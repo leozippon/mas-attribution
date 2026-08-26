@@ -1,21 +1,22 @@
 __pycache__/
 *.pyc
 .DS_Store
+.ruff_cache/
+.pytest_cache/
+.pi/
 
 .env
 *.log
 
 data/raw/
+data/processed/
 data/runs/
 data/traces/
 data/results/
-data/processed/tasks/*.jsonl
-data/processed/prepare_data_summary.json
-outputs/
-
-*.zip
-# Experiment artifacts
+data/cache/
 data/archive/
 data/backups/
-data/cache/
+outputs/
 logs/
+
+*.zip

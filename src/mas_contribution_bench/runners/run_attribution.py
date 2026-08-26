@@ -26,6 +26,7 @@ from mas_contribution_bench.runners.common import (
     load_experiment,
     mas_run_id,
     print_progress,
+    require_evaluation_score,
     run_mas_once,
     select_architectures,
     select_tasks,
@@ -36,15 +37,6 @@ from mas_contribution_bench.utils.io import append_jsonl, iter_jsonl, stable_id
 
 def _use_checkpointing() -> bool:
     return os.getenv("MAS_DISABLE_CHECKPOINT", "").lower() not in {"1", "true", "yes", "y"}
-
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _mean(values: list[float]) -> float:
@@ -274,6 +266,11 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
                     removed_agents=set(),
                     removal_protocol=protocol,
                 )
+                full_score = require_evaluation_score(
+                    full_eval,
+                    dataset=task.get("dataset"),
+                    task_id=task.get("task_id"),
+                )
                 append_jsonl(run_path, [full_run])
                 append_jsonl(trace_path, full_traces)
                 append_jsonl(evaluation_path, [full_eval])
@@ -281,7 +278,6 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
                 written_runs += 1
                 written_traces += len(full_traces)
                 written_evaluations += 1
-                full_score = _as_float(full_eval.score)
                 full_info = {
                     "score": full_score,
                     "run_id": full_run.run_id,
@@ -325,7 +321,11 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
                         removed_agents={agent},
                         removal_protocol=protocol,
                     )
-                    ablated_score = _as_float(ablated_eval.score)
+                    ablated_score = require_evaluation_score(
+                        ablated_eval,
+                        dataset=task.get("dataset"),
+                        task_id=task.get("task_id"),
+                    )
 
                     record = AttributionRecord(
                         attribution_id=attribution_id,
@@ -501,6 +501,11 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
 
         cached = coalition_cache.get(coalition_id)
         if cached is not None:
+            require_evaluation_score(
+                cached,
+                dataset=task.get("dataset") or cached.get("dataset"),
+                task_id=task.get("task_id") or cached.get("task_id"),
+            )
             return cached
 
         print_progress(
@@ -515,7 +520,11 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
             removed_agents=removed_agents,
             removal_protocol=protocol,
         )
-        score = _as_float(evaluation.score)
+        score = require_evaluation_score(
+            evaluation,
+            dataset=task.get("dataset"),
+            task_id=task.get("task_id"),
+        )
         row = {
             "coalition_id": coalition_id,
             "experiment_id": experiment.experiment_id,
@@ -554,7 +563,11 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
 
             for seed in seeds:
                 full_info = evaluate_coalition(task, architecture_id, int(seed), roles, all_agents)
-                full_score = _as_float(full_info.get("score"))
+                full_score = require_evaluation_score(
+                    full_info,
+                    dataset=task.get("dataset"),
+                    task_id=task.get("task_id"),
+                )
 
                 for method in methods:
                     rng = random.Random(
@@ -577,15 +590,19 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
                             rng.shuffle(permutation)
 
                             active: set[str] = set()
-                            prev_score = _as_float(
-                                evaluate_coalition(task, architecture_id, int(seed), roles, active).get("score")
+                            prev_score = require_evaluation_score(
+                                evaluate_coalition(task, architecture_id, int(seed), roles, active),
+                                dataset=task.get("dataset"),
+                                task_id=task.get("task_id"),
                             )
 
                             for agent in permutation:
                                 before = set(active)
                                 active.add(agent)
-                                current_score = _as_float(
-                                    evaluate_coalition(task, architecture_id, int(seed), roles, active).get("score")
+                                current_score = require_evaluation_score(
+                                    evaluate_coalition(task, architecture_id, int(seed), roles, active),
+                                    dataset=task.get("dataset"),
+                                    task_id=task.get("task_id"),
                                 )
                                 marginal = current_score - prev_score
                                 marginals_by_agent[agent].append(marginal)
@@ -606,11 +623,15 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
                                 with_agent = set(subset)
                                 with_agent.add(agent)
 
-                                without_score = _as_float(
-                                    evaluate_coalition(task, architecture_id, int(seed), roles, subset).get("score")
+                                without_score = require_evaluation_score(
+                                    evaluate_coalition(task, architecture_id, int(seed), roles, subset),
+                                    dataset=task.get("dataset"),
+                                    task_id=task.get("task_id"),
                                 )
-                                with_score = _as_float(
-                                    evaluate_coalition(task, architecture_id, int(seed), roles, with_agent).get("score")
+                                with_score = require_evaluation_score(
+                                    evaluate_coalition(task, architecture_id, int(seed), roles, with_agent),
+                                    dataset=task.get("dataset"),
+                                    task_id=task.get("task_id"),
                                 )
                                 marginal = with_score - without_score
                                 marginals_by_agent[agent].append(marginal)

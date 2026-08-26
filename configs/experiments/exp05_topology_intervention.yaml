@@ -1,64 +1,80 @@
 id: exp05_topology_intervention
 stage: 5
 name: Role-preserving topology rewiring
-purpose: Separate topology effects from role effects by fixing roles, permissions, model, and tasks while changing communication topology.
-
+purpose: >
+  Separate topology effects from role effects by fixing roles, position
+  permissions, model, and tasks while changing communication topology.
+  Execution is a single pass over controlled chain, star, and DAG graphs.
+  LiveCodeBench and SWE-bench Verified are excluded because they remain
+  score=None/passed=None in-loop.
 depends_on:
   - exp03_loo_attribution
-  - exp04_shapley_attribution
-
 research_questions:
   - RQ4
   - RQ6
-
 hypotheses:
   - H1
   - H2
   - H3
   - H8
-
 datasets:
-  - name: humaneval
-    task_file: data/processed/tasks/humaneval_tasks.jsonl
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
     split: test
-    max_tasks: 100
-    task_selection: deterministic_first
-
-  - name: mbpp
-    task_file: data/processed/tasks/mbpp_tasks.jsonl
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
     split: test
-    max_tasks: 200
-    task_selection: deterministic_first
-
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
 controlled_role_set:
   - planner
   - coder
   - verifier
   - critic
   - finalizer
-
 controlled_permission_set:
   planner: planner
   coder: coder
   verifier: verifier
   critic: critic
   finalizer: finalizer
-
 topology_variants:
   - id: controlled_chain
     template: chain
-    description: Linear Planner -> Coder -> Verifier -> Critic -> Finalizer workflow.
+    description: >
+      Single-pass linear Planner -> Coder -> Verifier -> Critic ->
+      Finalizer workflow. Roles and position permissions stay fixed.
     edges:
       - [planner, coder]
       - [coder, verifier]
       - [verifier, critic]
       - [critic, finalizer]
       - [finalizer, final_answer]
-
   - id: controlled_star
     template: star
     center: finalizer
-    description: Finalizer-centered star topology where all non-finalizer roles communicate through the finalizer.
+    description: >
+      Bidirectional star-shaped design graph centered on the finalizer.
+      Evaluated by a deterministic single-pass role order with the
+      finalizer last. This is not hub dispatch or mediation. Roles and
+      position permissions stay fixed.
     edges:
       - [finalizer, planner]
       - [planner, finalizer]
@@ -69,10 +85,12 @@ topology_variants:
       - [finalizer, critic]
       - [critic, finalizer]
       - [finalizer, final_answer]
-
   - id: controlled_dag
     template: dag
-    description: Planner branches to coding and verification paths, then critic integrates before finalizer.
+    description: >
+      Single-pass DAG. Planner branches to coding and verification, then
+      critic integrates before finalizer. Roles and position permissions
+      stay fixed.
     edges:
       - [planner, coder]
       - [planner, verifier]
@@ -80,85 +98,47 @@ topology_variants:
       - [verifier, critic]
       - [critic, finalizer]
       - [finalizer, final_answer]
-
-  - id: controlled_debate
-    template: debate
-    description: Bidirectional debate among planner, coder, verifier, and critic before finalization.
-    edges:
-      - [planner, coder]
-      - [coder, planner]
-      - [planner, verifier]
-      - [verifier, planner]
-      - [coder, critic]
-      - [critic, coder]
-      - [verifier, critic]
-      - [critic, verifier]
-      - [planner, finalizer]
-      - [coder, finalizer]
-      - [verifier, finalizer]
-      - [critic, finalizer]
-      - [finalizer, final_answer]
-
 attribution:
   methods:
     - loo
-    - shapley_sampled
-
   utility: task
   removal_protocol: null_agent_replacement
-
-  shapley:
-    num_permutations: 8
-    coalition_cache: true
-
-  save_coalition_scores: true
-
-analysis:
-  compare_with:
-    - exp03_loo_attribution
-    - exp04_shapley_attribution
-
-  topology_features:
-    - degree
-    - in_degree
-    - out_degree
-    - betweenness
-    - closeness
-    - pagerank
-    - dag_depth
-    - fan_in
-    - fan_out
-
-  tests:
-    - paired_test
-    - mixed_effects_regression
-
 seeds:
   - 0
   - 1
   - 2
-
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
 outputs:
-  run_dir: data/runs/interventions/topology
-  trace_dir: data/traces/interventions/topology
-  attribution_file: data/results/attribution/topology_intervention_attribution.jsonl
-  coalition_file: data/results/attribution/topology_intervention_coalitions.jsonl
-  statistics_file: data/results/statistics/topology_intervention.jsonl
-  score_file: data/results/scores/exp05_topology_intervention_scores.jsonl
-
+  run_dir: data/runs/exp05
+  trace_dir: data/traces/exp05
+  attribution_file: data/results/exp05/attribution.jsonl
+  coalition_file: data/results/exp05/coalitions.jsonl
+  statistics_file: data/results/exp05/statistics.jsonl
+  score_file: data/results/exp05/scores.jsonl
 benchmark_specs:
   architecture_dir: configs/benchmark_specs/architectures
   agent_dir: configs/benchmark_specs/agents
   prompt_dir: configs/benchmark_specs/prompts
   permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
-
 model:
-  backend: deepseek
-  name: deepseek-v4-flash
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 2
+  managed_externally: true
+  managed_by: zhangqy
   homogeneous: true
   temperature: 0.2
   max_tokens: 2048
-
+  timeout_seconds: 180
 logging:
   save_run_records: true
   save_full_trace: true
@@ -170,12 +150,8 @@ logging:
     - design_graph
     - trace_graph
     - dependency_graph
-
 evaluation:
   primary_utility: task
-  secondary_utilities:
-    - net
-    - process
-  code_task_metric: pass_at_1
-  non_code_task_metric: official_score
-  bootstrap_confidence_interval: true
+  notes: >
+    Only locally scored datasets are eligible for attribution.
+    Prediction/export-only datasets are excluded.

@@ -1,7 +1,9 @@
 id: A3_dag
 name: DAG Workflow
 family: dag_workflow
-description: "A directed acyclic workflow with parallel context retrieval and implementation, followed by debugging, testing, and finalization."
+description: >
+  A directed acyclic workflow with parallel context retrieval and
+  implementation, followed by debugging, testing, and finalization.
 
 roles:
   - planner
@@ -48,9 +50,13 @@ default_permissions:
   finalizer: finalizer
 
 recommended_datasets:
-  - humaneval
-  - mbpp
-  - swebench_lite
+  - aime_2026
+  - gpqa_diamond
+  - hle
+  - arc_agi_2
+  - ifbench
+  - livecodebench
+  - swebench_verified
 
 attribution_notes:
   removal_protocols: [hard_removal, bypass_removal, null_agent_replacement]

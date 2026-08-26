@@ -1,107 +1,41 @@
 id: exp09_contribution_predictor
 stage: 9
 name: Cheap structural contribution predictor
-purpose: Predict top-k critical agents from topology, role, permission, trace, and task features without
-  rerunning expensive attribution.
+status: unimplemented
+purpose: >
+  Planned design to predict top-k critical agents from topology, role,
+  permission, trace, and task features without rerunning expensive
+  attribution. This experiment is unimplemented and has no runner.
 depends_on:
-- exp03_loo_attribution
-- exp04_shapley_banzhaf_attribution
-- exp08_generalization
+  - exp03_loo_attribution
+  - exp04_shapley_attribution
+  - exp08_generalization
 research_questions:
-- RQ6
+  - RQ6
 hypotheses:
-- H1
-- H2
-- H4
-- H5
-- H9
-data_sources:
-  task_metadata: data/processed/metadata/task_metadata.jsonl
-  task_difficulty: data/processed/metadata/task_difficulty.jsonl
-  single_agent_baseline: data/processed/metadata/single_agent_baseline.jsonl
-  trace_features: data/results/features
-  attribution_records: data/results/attribution
+  - H1
+  - H2
+  - H4
+  - H5
+  - H9
+notes:
+  - The CLI refuses dispatch in auto and forced modes.
+  - No executable models, training loops, or dataset splits are implemented.
+  - Deprecated first-stage code-generation splits are not used.
 feature_groups:
-- topology
-- role
-- permission
-- trace_behavior
-- task_metadata
+  - topology
+  - role
+  - permission
+  - trace_behavior
+  - task_metadata
 targets:
-- loo_score
-- shapley_score
-- top1_critical_agent
-- top2_critical_agents
-models:
-- linear_regression
-- ridge_regression
-- random_forest
-- gradient_boosted_trees
-- learning_to_rank
-splits:
-- id: unseen_tasks
-  train:
-  - humaneval
-  - mbpp
-  test:
-  - humaneval
-  - mbpp
-  split_by: task_id
-- id: unseen_datasets
-  train:
-  - humaneval
-  - mbpp
-  test:
-  - teambench
-  - multiagentbench
-  - marble
-  - swebench_lite
-- id: unseen_architectures
-  train_architectures:
-  - A1_pev
-  - A2_chain
-  - A3_dag
-  - A5_star
-  test_architectures:
-  - A4_metagpt_lite
-  - A6_debate
-  - A7_graph
-metrics:
-- mae
-- spearman
-- kendall_tau
-- ndcg_at_2
-- precision_at_2
+  - loo_score
+  - shapley_score
+  - top1_critical_agent
 outputs:
-  feature_table: data/results/features/contribution_predictor_features.parquet
-  prediction_file: data/results/statistics/contribution_predictor_predictions.jsonl
-  metrics_file: data/results/statistics/contribution_predictor_metrics.jsonl
+  design_note: data/results/exp09/unimplemented.txt
 benchmark_specs:
   architecture_dir: configs/benchmark_specs/architectures
   agent_dir: configs/benchmark_specs/agents
   prompt_dir: configs/benchmark_specs/prompts
   permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
-model:
-  name: ${MODEL_NAME}
-  homogeneous: true
-  temperature: 0.2
-  max_tokens: 2048
-logging:
-  save_run_records: true
-  save_full_trace: true
-  save_tool_calls: true
-  save_intermediate_outputs: true
-  save_cost: true
-  save_failure_type: true
-  trace_graphs:
-  - design_graph
-  - trace_graph
-  - dependency_graph
-evaluation:
-  primary_utility: task
-  secondary_utilities:
-  - net
-  - process
-  code_task_metric: pass_at_1
-  non_code_task_metric: official_score
-  bootstrap_confidence_interval: true

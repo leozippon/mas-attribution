@@ -1,107 +1,111 @@
 id: exp06_role_intervention
 stage: 6
-name: Topology-preserving role swap
-purpose: Determine whether contribution follows the role label or remains with the graph position.
+name: Topology-preserving Planner-Coder role swap
+purpose: >
+  Test whether contribution follows the functional Planner/Coder prompt
+  or remains with the graph position. Topology and graph-position
+  permissions stay fixed; only the Planner and Coder functional prompts
+  are swapped. LiveCodeBench and SWE-bench Verified are excluded because
+  they remain score=None/passed=None in-loop.
 depends_on:
-- exp03_loo_attribution
-- exp05_topology_intervention
+  - exp03_loo_attribution
+  - exp05_topology_intervention
 research_questions:
-- RQ3
-- RQ4
+  - RQ3
+  - RQ4
 hypotheses:
-- H3
-- H5
+  - H3
+  - H5
 datasets:
-- name: humaneval
-  task_file: data/processed/tasks/humaneval_tasks.jsonl
-  split: test
-  max_tasks: 100
-  task_selection: deterministic_first
-- name: mbpp
-  task_file: data/processed/tasks/mbpp_tasks.jsonl
-  split: test
-  max_tasks: 200
-  task_selection: deterministic_first
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
 base_architectures:
-- A2_chain
-- A3_dag
-- A5_star
+  - A2_chain
+  - A3_dag
+  - A5_star
 role_swaps:
-- id: planner_coder_swap
-  swap:
-  - planner
-  - coder
-  controls:
-  - same_topology
-  - same_permissions
-  - same_model
-- id: coder_verifier_swap
-  swap:
-  - coder
-  - verifier
-  controls:
-  - same_topology
-  - same_permissions
-  - same_model
-- id: critic_finalizer_swap
-  swap:
-  - critic
-  - finalizer
-  controls:
-  - same_topology
-  - same_permissions
-  - same_model
-- id: debugger_tester_swap
-  swap:
-  - debugger
-  - tester
-  controls:
-  - same_topology
-  - same_permissions
-  - same_model
-- id: supervisor_finalizer_swap
-  swap:
-  - supervisor
-  - finalizer
-  controls:
-  - same_topology
-  - same_permissions
-  - same_model
+  - id: planner_coder_swap
+    swap:
+      - planner
+      - coder
+    description: >
+      Swap only the Planner and Coder functional/prompt assignments.
+      Graph topology stays fixed. Graph-position permissions stay fixed
+      on the original positions.
+    controls:
+      - same_topology
+      - same_position_permissions
+      - same_model
 attribution:
   methods:
-  - loo
-  - shapley_sampled
+    - loo
+  utility: task
   removal_protocol: null_agent_replacement
-  permutation_samples: 64
 analysis:
-  effect_targets:
-  - role_effect
-  - position_effect
-  - role_position_interaction
-  tests:
-  - paired_test
-  - mixed_effects_regression
+  descriptive_only: true
+  notes: >
+    Graph-position permissions remain fixed. Attribution is reported
+    over graph-position roles; metadata records the swapped functional
+    prompt used at each position.
 seeds:
-- 0
-- 1
-- 2
+  - 0
+  - 1
+  - 2
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
 outputs:
-  run_dir: data/runs/interventions/role
-  trace_dir: data/traces/interventions/role
-  attribution_file: data/results/attribution/role_intervention_attribution.jsonl
-  coalition_file: data/results/attribution/role_intervention_coalitions.jsonl
-  score_file: data/results/scores/exp06_role_intervention_scores.jsonl
-  statistics_file: data/results/statistics/role_intervention.jsonl
+  run_dir: data/runs/exp06
+  trace_dir: data/traces/exp06
+  attribution_file: data/results/exp06/attribution.jsonl
+  coalition_file: data/results/exp06/coalitions.jsonl
+  score_file: data/results/exp06/scores.jsonl
+  statistics_file: data/results/exp06/statistics.jsonl
 benchmark_specs:
   architecture_dir: configs/benchmark_specs/architectures
   agent_dir: configs/benchmark_specs/agents
   prompt_dir: configs/benchmark_specs/prompts
   permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
 model:
-  name: ${MODEL_NAME}
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 2
+  managed_externally: true
+  managed_by: zhangqy
   homogeneous: true
   temperature: 0.2
   max_tokens: 2048
+  timeout_seconds: 180
 logging:
   save_run_records: true
   save_full_trace: true
@@ -110,14 +114,11 @@ logging:
   save_cost: true
   save_failure_type: true
   trace_graphs:
-  - design_graph
-  - trace_graph
-  - dependency_graph
+    - design_graph
+    - trace_graph
+    - dependency_graph
 evaluation:
   primary_utility: task
-  secondary_utilities:
-  - net
-  - process
-  code_task_metric: pass_at_1
-  non_code_task_metric: official_score
-  bootstrap_confidence_interval: true
+  notes: >
+    Only locally scored datasets are eligible for attribution.
+    Prediction/export-only datasets are excluded.

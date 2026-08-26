@@ -11,5 +11,6 @@ tqdm
 jsonlines
 pyarrow
 requests
+ifbench==0.2.0
 matplotlib
 seaborn

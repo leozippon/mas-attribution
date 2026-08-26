@@ -1,60 +1,61 @@
 id: exp07_permission_intervention
 stage: 7
 name: Runtime-enforced permission intervention
-purpose: Estimate the independent contribution of write access, test/tool access,
-  and final-answer authority under runtime-enforced permission constraints.
+purpose: >
+  Estimate the contribution of write_solution and final_answer authority
+  under strict runtime permission enforcement. Tool and test toggles are
+  not part of this experiment. LiveCodeBench and SWE-bench Verified are
+  excluded because they remain score=None/passed=None in-loop.
 depends_on:
-- exp03_loo_attribution
-- exp06_role_intervention
+  - exp03_loo_attribution
+  - exp06_role_intervention
 research_questions:
-- RQ5
+  - RQ5
 hypotheses:
-- H4
-- H5
+  - H4
+  - H5
 datasets:
-- name: humaneval
-  task_file: data/processed/tasks/humaneval_tasks.jsonl
-  split: test
-  max_tasks: 10
-  task_selection: deterministic_first
-- name: mbpp
-  task_file: data/processed/tasks/mbpp_tasks.jsonl
-  split: test
-  max_tasks: 20
-  task_selection: deterministic_first
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
 base_architectures:
-- A2_chain
-- A3_dag
-- A5_star
+  - A2_chain
+  - A3_dag
 permission_interventions:
-- id: coder_write_access
-  role: coder
-  toggle: write_solution
-  levels:
-  - false
-  - true
-- id: verifier_test_access
-  role: verifier
-  toggles:
-  - call_tools
-  - run_tests
-  levels:
-  - false
-  - true
-- id: tester_test_access
-  role: tester
-  toggles:
-  - call_tools
-  - run_tests
-  levels:
-  - false
-  - true
-- id: finalizer_final_authority
-  role: finalizer
-  toggle: final_answer
-  levels:
-  - false
-  - true
+  - id: coder_write_access
+    role: coder
+    toggle: write_solution
+    levels:
+      - false
+      - true
+  - id: finalizer_final_authority
+    role: finalizer
+    toggle: final_answer
+    levels:
+      - false
+      - true
 permission_enforcement:
   mode: strict
   block_unauthorized_artifacts: true
@@ -62,41 +63,47 @@ permission_enforcement:
   record_permission_diagnostics: true
 attribution:
   methods:
-  - loo
-  - shapley_sampled
+    - loo
+  utility: task
   removal_protocol: null_agent_replacement
-  permutation_samples: 16
 analysis:
-  effect_targets:
-  - tool_access_effect
-  - write_access_effect
-  - final_authority_effect
-  tests:
-  - paired_test
-  - mixed_effects_regression
-  - fdr_correction
+  descriptive_only: true
 seeds:
-- 0
-- 1
-- 2
+  - 0
+  - 1
+  - 2
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
 outputs:
-  run_dir: data/runs/interventions/permission
-  trace_dir: data/traces/interventions/permission
-  attribution_file: data/results/attribution/permission_intervention_attribution.jsonl
-  coalition_file: data/results/attribution/permission_intervention_coalitions.jsonl
-  score_file: data/results/scores/exp07_permission_intervention_scores.jsonl
-  evaluation_file: data/results/scores/exp07_permission_intervention_scores.jsonl
-  statistics_file: data/results/statistics/permission_intervention.jsonl
+  run_dir: data/runs/exp07
+  trace_dir: data/traces/exp07
+  attribution_file: data/results/exp07/attribution.jsonl
+  coalition_file: data/results/exp07/coalitions.jsonl
+  score_file: data/results/exp07/scores.jsonl
+  statistics_file: data/results/exp07/statistics.jsonl
 benchmark_specs:
   architecture_dir: configs/benchmark_specs/architectures
   agent_dir: configs/benchmark_specs/agents
   prompt_dir: configs/benchmark_specs/prompts
   permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
 model:
-  name: ${MODEL_NAME}
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 2
+  managed_externally: true
+  managed_by: zhangqy
   homogeneous: true
   temperature: 0.2
   max_tokens: 2048
+  timeout_seconds: 180
 logging:
   save_run_records: true
   save_full_trace: true
@@ -105,14 +112,11 @@ logging:
   save_cost: true
   save_failure_type: true
   trace_graphs:
-  - design_graph
-  - trace_graph
-  - dependency_graph
+    - design_graph
+    - trace_graph
+    - dependency_graph
 evaluation:
   primary_utility: task
-  secondary_utilities:
-  - net
-  - process
-  code_task_metric: pass_at_1
-  non_code_task_metric: official_score
-  bootstrap_confidence_interval: true
+  notes: >
+    Only locally scored datasets are eligible for attribution.
+    Prediction/export-only datasets are excluded.

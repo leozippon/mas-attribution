@@ -1,67 +1,118 @@
 id: exp02_single_agent_baseline
 stage: 2
 name: Single-agent, solo-role, and random-team baselines
-purpose: Test whether MAS improves over non-collaborative baselines and estimate task difficulty.
+purpose: >
+  Compare MAS runs against non-collaborative baselines on the same fixed
+  seeded seven-dataset subset. LiveCodeBench and SWE-bench Verified are
+  prediction/export-only in-loop.
 research_questions:
-- RQ1
-- RQ3
+  - RQ1
+  - RQ3
 hypotheses:
-- H5
+  - H5
 datasets:
-- name: humaneval
-  task_file: data/processed/tasks/humaneval_tasks.jsonl
-  split: test
-  max_tasks: 100
-  task_selection: deterministic_first
-- name: mbpp
-  task_file: data/processed/tasks/mbpp_tasks.jsonl
-  split: test
-  max_tasks: 200
-  task_selection: deterministic_first
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: livecodebench
+    task_file: data/processed/tasks/livecodebench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+    scoring: prediction_export_only
+    in_loop_score: null
+    notes: >
+      In-loop score=None and passed=None. Not attribution-eligible until
+      official results are joined.
+  - name: swebench_verified
+    task_file: data/processed/tasks/swebench_verified_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+    scoring: prediction_export_only
+    in_loop_score: null
+    notes: >
+      In-loop score=None and passed=None. Not attribution-eligible until
+      official results are joined.
 baselines:
-- id: single_agent_coder
-  type: single_agent
-  agent: coder
-  prompt_file: configs/benchmark_specs/prompts/coder.md
-- id: single_agent_generalist
-  type: single_agent
-  agent: finalizer
-  prompt_file: configs/benchmark_specs/prompts/finalizer.md
-- id: solo_role
-  type: solo_role
-  roles:
-  - planner
-  - coder
-  - debugger
-  - verifier
-  - critic
-  - researcher
-  - supervisor
-  - finalizer
-- id: random_team
-  type: random_team
-  team_size: 5
-  num_samples_per_task: 3
+  - id: single_agent_coder
+    type: single_agent
+    agent: coder
+    prompt_file: configs/benchmark_specs/prompts/coder.md
+  - id: single_agent_generalist
+    type: single_agent
+    agent: finalizer
+    prompt_file: configs/benchmark_specs/prompts/finalizer.md
+  - id: solo_role
+    type: solo_role
+    roles:
+      - planner
+      - coder
+      - debugger
+      - verifier
+      - critic
+      - researcher
+      - supervisor
+      - finalizer
+  - id: random_team
+    type: random_team
+    team_size: 5
+    num_samples_per_task: 3
 seeds:
-- 0
-- 1
-- 2
+  - 0
+  - 1
+  - 2
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
 outputs:
-  run_dir: data/runs/single_agent
-  trace_dir: data/traces/baselines
-  score_file: data/results/scores/baseline_scores.jsonl
-  single_agent_metadata_file: data/processed/metadata/single_agent_baseline.jsonl
-  difficulty_file: data/processed/metadata/task_difficulty.jsonl
+  run_dir: data/runs/exp02
+  trace_dir: data/traces/exp02
+  score_file: data/results/exp02/scores.jsonl
 benchmark_specs:
   architecture_dir: configs/benchmark_specs/architectures
   agent_dir: configs/benchmark_specs/agents
   prompt_dir: configs/benchmark_specs/prompts
   permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
 model:
-  name: ${MODEL_NAME}
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 2
+  managed_externally: true
+  managed_by: zhangqy
   homogeneous: true
   temperature: 0.2
   max_tokens: 2048
+  timeout_seconds: 180
 logging:
   save_run_records: true
   save_full_trace: true
@@ -70,14 +121,24 @@ logging:
   save_cost: true
   save_failure_type: true
   trace_graphs:
-  - design_graph
-  - trace_graph
-  - dependency_graph
+    - design_graph
+    - trace_graph
+    - dependency_graph
 evaluation:
   primary_utility: task
   secondary_utilities:
-  - net
-  - process
-  code_task_metric: pass_at_1
-  non_code_task_metric: official_score
-  bootstrap_confidence_interval: true
+    - net
+    - process
+  local_scored_datasets:
+    - aime_2026
+    - gpqa_diamond
+    - hle
+    - arc_agi_2
+    - ifbench
+  prediction_export_only_datasets:
+    - livecodebench
+    - swebench_verified
+  notes: >
+    LiveCodeBench and SWE-bench Verified remain in-loop
+    prediction/export-only (score=None, passed=None) and are not
+    attribution-eligible until official results are joined.

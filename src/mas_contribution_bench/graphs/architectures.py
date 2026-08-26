@@ -252,10 +252,9 @@ def controlled_architecture(raw: dict[str, Any], architecture_id: str = "control
     if "execution_mode" not in orchestration:
         if template in {"chain", "dag"}:
             orchestration["execution_mode"] = "dag"
-        elif template in {"star", "debate", "graph"}:
-            orchestration["execution_mode"] = "debate"
         else:
-            orchestration["execution_mode"] = "dag"
+            orchestration["execution_mode"] = "single_pass"
+    orchestration.setdefault("max_rounds", 1)
 
     return LoadedArchitectureSpec(
         architecture_id=architecture_id,

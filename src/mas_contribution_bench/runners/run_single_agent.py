@@ -21,7 +21,11 @@ from mas_contribution_bench.runners.common import (
     backup_existing_file,
     build_model_client,
     completed_run_ids,
+    execution_fingerprint,
+    execution_treatment,
+    identity_role_map,
     load_experiment,
+    mas_run_id,
     print_progress,
     sandbox_backend,
     should_execute_code,
@@ -43,14 +47,24 @@ def _final_role(roles: list[str]) -> str | None:
     return roles[-1] if roles else None
 
 
-def _invoke_roles(experiment, task: dict[str, Any], roles: list[str]) -> tuple[dict[str, Any], str]:
+def _invoke_roles(
+    experiment,
+    task: dict[str, Any],
+    roles: list[str],
+    seed: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    model_overrides = dict(experiment.raw.get("model", {}) or {})
+    if seed is not None:
+        model_overrides["seed"] = int(seed)
     agents = build_agents(
         experiment.benchmark.agents,
         roles,
         model_client=build_model_client(experiment),
-        model_overrides=experiment.raw.get("model", {}),
+        model_overrides=model_overrides,
     )
     state: dict[str, Any] = {"task": task, "messages": [], "agent_outputs": {}}
+    if seed is not None:
+        state["seed"] = int(seed)
     for role in roles:
         output = agents[role].invoke(state)
         payload = {
@@ -100,6 +114,20 @@ def _baseline_specs(experiment) -> list[dict[str, Any]]:
     return specs
 
 
+def _baseline_run_id(experiment, task: dict[str, Any], spec: dict[str, Any], seed: int, roles: list[str]) -> str:
+    return mas_run_id(
+        experiment,
+        task["task_id"],
+        spec["id"],
+        int(seed),
+        removed_agents=[],
+        removal_protocol="none",
+        role_map_items=sorted(identity_role_map(roles).items()),
+        permission_overrides=None,
+        condition_id="baseline",
+    )
+
+
 def _roles_for_spec(spec: dict[str, Any], task_id: str, seed: int) -> list[str]:
     roles = list(spec["roles"])
     if spec.get("type") != "random_team":
@@ -116,9 +144,11 @@ def _run_baseline_once(experiment, task: dict[str, Any], spec: dict[str, Any], s
     roles = _roles_for_spec(spec, task["task_id"], seed)
     baseline_id = spec["id"]
     set_seed(seed)
-    run_id = stable_id(experiment.experiment_id, task["task_id"], baseline_id, seed, roles)
+    treatment = execution_treatment(experiment, removal_protocol="none")
+    fingerprint = execution_fingerprint(experiment, removal_protocol="none")
+    run_id = _baseline_run_id(experiment, task, spec, seed, roles)
     started = datetime.now(timezone.utc)
-    state, final_answer = _invoke_roles(experiment, task, roles)
+    state, final_answer = _invoke_roles(experiment, task, roles, seed=seed)
     traces = build_trace_records(run_id, task["task_id"], state)
     cost = trace_cost(traces)
     evaluation = evaluate_task_output(
@@ -151,9 +181,19 @@ def _run_baseline_once(experiment, task: dict[str, Any], spec: dict[str, Any], s
             "baseline_id": baseline_id,
             "roles": roles,
             "sample": spec.get("sample"),
+            "execution_fingerprint": fingerprint,
+            "execution_treatment": treatment,
         },
     )
-    evaluation.metadata.update({"baseline_type": spec.get("type"), "roles": roles, "sample": spec.get("sample")})
+    evaluation.metadata.update(
+        {
+            "baseline_type": spec.get("type"),
+            "roles": roles,
+            "sample": spec.get("sample"),
+            "execution_fingerprint": fingerprint,
+            "execution_treatment": treatment,
+        }
+    )
     return run, traces, evaluation
 
 
@@ -192,7 +232,7 @@ def run_single_agent_baseline(config_path: str | Path, max_tasks: int | None = N
         for spec in specs:
             for seed in seeds:
                 roles = _roles_for_spec(spec, task["task_id"], seed)
-                run_id = stable_id(experiment.experiment_id, task["task_id"], spec["id"], seed, roles)
+                run_id = _baseline_run_id(experiment, task, spec, seed, roles)
                 label = f"task={task.get('task_id')} baseline={spec['id']} seed={seed} roles={','.join(roles)}"
                 if run_id in done:
                     print_progress(f"[skip] {completed}/{total} {label} run_id={run_id}")

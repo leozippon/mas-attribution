@@ -1,7 +1,9 @@
 id: A2_chain
 name: Chain
 family: linear_workflow
-description: "A longer sequential workflow with planning, implementation, critique, and final synthesis."
+description: >
+  A longer sequential workflow with planning, implementation, critique,
+  and final synthesis.
 
 roles:
   - planner
@@ -39,9 +41,13 @@ default_permissions:
   finalizer: finalizer
 
 recommended_datasets:
-  - humaneval
-  - mbpp
-  - teambench
+  - aime_2026
+  - gpqa_diamond
+  - hle
+  - arc_agi_2
+  - ifbench
+  - livecodebench
+  - swebench_verified
 
 attribution_notes:
   removal_protocols: [hard_removal, bypass_removal, null_agent_replacement]

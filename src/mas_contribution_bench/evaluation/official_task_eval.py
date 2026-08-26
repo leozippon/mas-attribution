@@ -1,18 +1,19 @@
 """Official-style evaluators for deterministic non-code benchmark tasks.
 
 These functions cover benchmarks whose official score is exact answer,
-exact grid match, or rule-based instruction following. Benchmarks that need a
-workspace or an interactive environment are handled by external harness scripts.
+exact grid match, or AllenAI IFBench strict instruction following.
+Benchmarks that need a workspace or an interactive environment are handled by
+external harness scripts.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import re
 import string
 from typing import Any
 
+from mas_contribution_bench.data.external import extract_arc_expected_outputs, resolve_gpqa_gold
 from mas_contribution_bench.data.schemas import FailureType
 
 
@@ -69,10 +70,9 @@ def extract_integer(text: str | None) -> str:
 
 def exact_answer_eval(task: dict[str, Any], prediction: str | None) -> tuple[float, bool, FailureType, dict[str, Any]]:
     dataset = str(task.get("dataset", "")).lower()
-    metadata = task.get("metadata") or {}
     reference = task.get("reference_solution")
-    if dataset == "gpqa_diamond" and not reference:
-        reference = metadata.get("Correct Answer") or metadata.get("Pre-Revision Correct Answer")
+    if dataset == "gpqa_diamond" and (reference is None or str(reference).strip() == ""):
+        reference = resolve_gpqa_gold(task)
     if reference is None or str(reference).strip() == "":
         return 0.0, False, FailureType.UNKNOWN, {"evaluator": "official_exact_match", "reason": "missing_reference"}
     if not prediction or not str(prediction).strip():
@@ -110,6 +110,9 @@ def _load_jsonish(text: str | None) -> Any:
 
 
 def _extract_arc_expected(task: dict[str, Any]) -> list[Any]:
+    dedicated = extract_arc_expected_outputs(task)
+    if dedicated:
+        return dedicated
     raw = _load_jsonish(task.get("prompt"))
     if not isinstance(raw, dict):
         return []
@@ -153,162 +156,130 @@ def arc_agi_2_eval(task: dict[str, Any], prediction: str | None) -> tuple[float,
     }
 
 
-def _compare_count(count: int, relation: str, target: int) -> bool:
-    rel = relation.lower().strip()
-    if rel == "at least":
-        return count >= target
-    if rel in {"more than", "greater than"}:
-        return count > target
-    if rel == "at most":
-        return count <= target
-    if rel in {"less than", "fewer than"}:
-        return count < target
-    if rel in {"exactly", "equal to", "equals"}:
-        return count == target
-    return count >= target
+IFBENCH_PACKAGE_ERROR = (
+    "Official AllenAI IFBench verifier is unavailable. "
+    "Install the pinned project dependency ifbench==0.2.0."
+)
 
 
-def _sentences(answer: str) -> list[str]:
-    return [s.strip() for s in re.split(r"[.!?。！？]+", answer) if s.strip()]
+def load_ifbench_instructions_registry() -> Any:
+    """Import AllenAI IFBench's official instruction registry.
+
+    Import is deferred so offline tests can mock the registry without installing
+    the package. Runtime IFBench evaluation must call this after empty-output
+    handling.
+    """
+    try:
+        from ifbench import instructions_registry  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise RuntimeError(IFBENCH_PACKAGE_ERROR) from exc
+    if not hasattr(instructions_registry, "INSTRUCTION_DICT"):
+        raise RuntimeError(
+            "Official AllenAI IFBench verifier is invalid: "
+            "instructions_registry.INSTRUCTION_DICT is missing."
+        )
+    return instructions_registry
 
 
-def _paragraphs(answer: str) -> list[str]:
-    parts = [p.strip() for p in re.split(r"\n\s*\n", answer.strip()) if p.strip()]
-    return parts or ([answer.strip()] if answer.strip() else [])
+def _ifbench_kwargs(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): value for key, value in raw.items() if value is not None}
 
 
-def _ifeval_one(instruction_id: str, kwargs: dict[str, Any], answer: str, prompt: str) -> tuple[bool | None, dict[str, Any]]:
-    if instruction_id == "punctuation:no_comma":
-        return ("," not in answer and "，" not in answer), {}
-    if instruction_id == "length_constraints:number_words":
-        words = re.findall(r"\b\w+\b", answer)
-        target = int(kwargs.get("num_words", 0) or 0)
-        return _compare_count(len(words), str(kwargs.get("relation", "at least")), target), {"word_count": len(words)}
-    if instruction_id == "length_constraints:number_sentences":
-        count = len(_sentences(answer))
-        target = int(kwargs.get("num_sentences", 0) or 0)
-        return _compare_count(count, str(kwargs.get("relation", "at least")), target), {"sentence_count": count}
-    if instruction_id == "length_constraints:number_paragraphs":
-        count = len(_paragraphs(answer))
-        target = int(kwargs.get("num_paragraphs", 0) or 0)
-        return count == target, {"paragraph_count": count}
-    if instruction_id == "length_constraints:nth_paragraph_first_word":
-        paragraphs = _paragraphs(answer)
-        nth = int(kwargs.get("nth_paragraph", 1) or 1) - 1
-        expected = str(kwargs.get("first_word", "")).lower()
-        actual = ""
-        if 0 <= nth < len(paragraphs):
-            match = re.search(r"\b\w+\b", paragraphs[nth])
-            actual = match.group(0).lower() if match else ""
-        return actual == expected, {"actual_first_word": actual, "expected_first_word": expected}
-    if instruction_id == "keywords:forbidden_words":
-        forbidden = [str(w).lower() for w in kwargs.get("forbidden_words", [])]
-        lower = answer.lower()
-        hits = [word for word in forbidden if re.search(rf"\b{re.escape(word)}\b", lower)]
-        return not hits, {"forbidden_hits": hits}
-    if instruction_id == "keywords:existence":
-        keywords = [str(w).lower() for w in kwargs.get("keywords", [])]
-        lower = answer.lower()
-        missing = [word for word in keywords if word not in lower]
-        return not missing, {"missing_keywords": missing}
-    if instruction_id == "keywords:frequency":
-        keyword = str(kwargs.get("keyword", "")).lower()
-        target = int(kwargs.get("frequency", 0) or 0)
-        count = len(re.findall(rf"\b{re.escape(keyword)}\b", answer.lower())) if keyword else 0
-        return _compare_count(count, str(kwargs.get("relation", "at least")), target), {"keyword_count": count}
-    if instruction_id == "keywords:letter_frequency":
-        letter = str(kwargs.get("letter", ""))
-        target = int(kwargs.get("let_frequency", 0) or 0)
-        count = answer.count(letter) if letter else 0
-        return _compare_count(count, str(kwargs.get("let_relation", "at least")), target), {"letter_count": count}
-    if instruction_id == "detectable_format:number_highlighted_sections":
-        target = int(kwargs.get("num_highlights", 0) or 0)
-        count = len(re.findall(r"(?<!\*)\*[^*\n][^*]*\*(?!\*)", answer))
-        return count >= target, {"highlight_count": count}
-    if instruction_id == "detectable_format:title":
-        return bool(re.search(r"<<[^<>\n]+>>", answer) or re.search(r"^\s*#\s+.+", answer, flags=re.M)), {}
-    if instruction_id == "detectable_format:number_bullet_lists":
-        target = int(kwargs.get("num_bullets", 0) or 0)
-        count = len(re.findall(r"(?m)^\s*(?:[-*+]\s+|\d+[.)]\s+)", answer))
-        return count >= target, {"bullet_count": count}
-    if instruction_id == "detectable_format:json_format":
-        try:
-            json.loads(unwrap_answer(answer))
-            return True, {}
-        except Exception as exc:
-            return False, {"json_error": str(exc)}
-    if instruction_id == "detectable_format:multiple_sections":
-        target = int(kwargs.get("num_sections", 0) or 0)
-        splitter = str(kwargs.get("section_spliter", "PARAGRAPH"))
-        count = len(_paragraphs(answer)) if splitter.upper() == "PARAGRAPH" else len(re.split(re.escape(splitter), answer))
-        return count >= target, {"section_count": count}
-    if instruction_id == "detectable_format:constrained_response":
-        normalized = normalize_text(answer)
-        return normalized in {"yes", "no", "maybe", "true", "false"}, {"normalized": normalized}
-    if instruction_id == "detectable_content:number_placeholders":
-        target = int(kwargs.get("num_placeholders", 0) or 0)
-        count = len(re.findall(r"\[[^\]]*\]|<[^>]*>|\{[^}]*\}", answer))
-        return count >= target, {"placeholder_count": count}
-    if instruction_id == "detectable_content:postscript":
-        marker = str(kwargs.get("postscript_marker", "P.S."))
-        return marker.lower() in answer.lower(), {"marker": marker}
-    if instruction_id == "startend:end_checker":
-        phrase = str(kwargs.get("end_phrase", "")).strip()
-        return answer.rstrip().endswith(phrase), {"end_phrase": phrase}
-    if instruction_id == "startend:quotation":
-        stripped = answer.strip()
-        return len(stripped) >= 2 and stripped[0] in {'"', "'", "“"} and stripped[-1] in {'"', "'", "”"}, {}
-    if instruction_id == "change_case:english_lowercase":
-        letters = re.findall(r"[A-Za-z]", answer)
-        return bool(letters) and all(ch.islower() for ch in letters), {}
-    if instruction_id == "change_case:english_capital":
-        letters = re.findall(r"[A-Za-z]", answer)
-        return bool(letters) and all(not ch.islower() for ch in letters), {}
-    if instruction_id == "change_case:capital_word_frequency":
-        words = re.findall(r"\b[A-Z]{2,}\b", answer)
-        target = int(kwargs.get("capital_frequency", 0) or 0)
-        return _compare_count(len(words), str(kwargs.get("capital_relation", "at most")), target), {"capital_word_count": len(words)}
-    if instruction_id == "combination:repeat_prompt":
-        required = str(kwargs.get("prompt_to_repeat", prompt)).strip()
-        return normalize_text(answer) == normalize_text(required), {}
-    if instruction_id == "combination:two_responses":
-        markers = len(re.findall(r"(?im)response\s*[12]|answer\s*[12]|^\s*[12][.)]", answer))
-        return markers >= 2, {"response_markers": markers}
-    if instruction_id == "language:response_language":
-        return None, {"reason": "language_detection_requires_official_checker", "language": kwargs.get("language")}
-    return None, {"reason": "unsupported_instruction"}
+def _ifbench_instruction_ids(task: dict[str, Any]) -> list[str]:
+    metadata_raw = task.get("metadata")
+    metadata = metadata_raw if isinstance(metadata_raw, dict) else {}
+    raw_ids = metadata.get("instruction_id_list")
+    if raw_ids is None:
+        raw_ids = task.get("instruction_id_list")
+    if raw_ids is None:
+        return []
+    if isinstance(raw_ids, str):
+        return [raw_ids] if raw_ids.strip() else []
+    if isinstance(raw_ids, (list, tuple)):
+        return [str(item) for item in raw_ids if item not in (None, "")]
+    return []
+
+
+def _ifbench_kwargs_list(task: dict[str, Any], count: int) -> list[dict[str, Any]]:
+    metadata_raw = task.get("metadata")
+    metadata = metadata_raw if isinstance(metadata_raw, dict) else {}
+    raw = metadata.get("kwargs")
+    if raw is None:
+        raw = task.get("kwargs")
+    if isinstance(raw, dict):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = []
+    if len(items) != count or any(not isinstance(item, dict) for item in items):
+        raise ValueError(
+            "IFBench task metadata must provide one kwargs object per instruction ID; "
+            f"got {len(items)} kwargs entries for {count} instruction IDs."
+        )
+    return [_ifbench_kwargs(item) for item in items]
+
+
+def _check_ifbench_instruction(
+    registry: Any,
+    instruction_id: str,
+    kwargs: dict[str, Any],
+    answer: str,
+    prompt: str,
+) -> dict[str, Any]:
+    registry_dict = registry.INSTRUCTION_DICT
+    if instruction_id not in registry_dict:
+        raise ValueError(
+            f"Unknown IFBench instruction ID {instruction_id!r}. "
+            "Official AllenAI IFBench verifier has no checker for this ID; "
+            "unsupported rules are not scored as zero."
+        )
+    instruction_cls = registry_dict[instruction_id]
+    instruction = instruction_cls(instruction_id)
+    instruction.build_description(**kwargs)
+    args = instruction.get_instruction_args()
+    if args and "prompt" in args:
+        instruction.build_description(prompt=prompt)
+    passed = bool(instruction.check_following(answer))
+    return {"instruction_id": instruction_id, "passed": passed, "kwargs": kwargs}
 
 
 def ifbench_eval(task: dict[str, Any], prediction: str | None) -> tuple[float, bool, FailureType, dict[str, Any]]:
     answer = unwrap_answer(prediction)
-    if not answer.strip():
-        return 0.0, False, FailureType.EMPTY_OUTPUT, {"evaluator": "ifeval_official_compatible_rule_engine"}
-    metadata = task.get("metadata") or {}
-    ids = list(metadata.get("instruction_id_list") or [])
-    kwargs_list = list(metadata.get("kwargs") or [])
-    prompt = str(task.get("prompt") or "")
-    details: list[dict[str, Any]] = []
-    supported = 0
-    passed_count = 0
-    for idx, instruction_id in enumerate(ids):
-        kwargs = kwargs_list[idx] if idx < len(kwargs_list) and isinstance(kwargs_list[idx], dict) else {}
-        passed, extra = _ifeval_one(str(instruction_id), kwargs, answer, prompt)
-        details.append({"instruction_id": instruction_id, "passed": passed, **extra})
-        if passed is not None:
-            supported += 1
-            passed_count += int(bool(passed))
-    if supported == 0:
-        return 0.0, False, FailureType.UNKNOWN, {
-            "evaluator": "ifeval_official_compatible_rule_engine",
-            "supported_rules": 0,
-            "details": details,
+    if not str(answer).strip():
+        return 0.0, False, FailureType.EMPTY_OUTPUT, {
+            "evaluator": "allenai_ifbench_strict",
+            "verification": "official AllenAI IFBench strict verification",
+            "reason": "empty_output",
         }
-    score = passed_count / supported
-    passed = math.isclose(score, 1.0)
+    registry = load_ifbench_instructions_registry()
+    ids = _ifbench_instruction_ids(task)
+    if not ids:
+        raise ValueError(
+            "IFBench task metadata has no instruction IDs; "
+            "official AllenAI IFBench strict verification cannot run."
+        )
+    kwargs_list = _ifbench_kwargs_list(task, len(ids))
+    prompt = str(task.get("prompt") or "")
+    details = [
+        _check_ifbench_instruction(registry, str(instruction_id), kwargs_list[idx], answer, prompt)
+        for idx, instruction_id in enumerate(ids)
+    ]
+    followed = sum(1 for item in details if item["passed"])
+    total = len(details)
+    instruction_level_rate = followed / total
+    passed = followed == total
+    score = 1.0 if passed else 0.0
     return score, passed, (FailureType.NONE if passed else FailureType.TEST_FAILURE), {
-        "evaluator": "ifeval_official_compatible_rule_engine",
-        "supported_rules": supported,
-        "total_rules": len(ids),
+        "evaluator": "allenai_ifbench_strict",
+        "verification": "official AllenAI IFBench strict verification",
+        "strict": True,
+        "prompt_level_passed": passed,
+        "instruction_level_rate": instruction_level_rate,
+        "followed_instructions": followed,
+        "total_instructions": total,
         "details": details,
     }
 

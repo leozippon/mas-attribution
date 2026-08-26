@@ -16,7 +16,8 @@ dependencies = [
   "tqdm",
   "jsonlines",
   "pyarrow",
-  "requests"
+  "requests",
+  "ifbench==0.2.0"
 ]
 
 [tool.setuptools.packages.find]

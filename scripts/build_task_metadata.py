@@ -1,10 +1,10 @@
-"""Build task-level metadata from processed TaskRecord JSONL files.
+"""Optional export of task-level metadata from processed TaskRecord JSONL files.
 
 This script reads `data/processed/tasks/*.jsonl` and writes a lightweight task
 index to `data/processed/metadata/task_metadata.jsonl`.
 
-The output is used for task filtering, dataset statistics, experiment sampling,
-and joining task factors with later score/attribution results.
+It is an optional export only. It is not the canonical sampling path and Exp08
+does not depend on its output.
 """
 
 from __future__ import annotations

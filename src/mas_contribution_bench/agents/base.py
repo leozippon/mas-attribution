@@ -12,6 +12,8 @@ from typing import Any, ClassVar, Protocol
 
 import requests
 
+from mas_contribution_bench.data.external import public_task_view
+
 
 class ModelClient(Protocol):
     """Minimal model interface.
@@ -137,9 +139,9 @@ class DeepSeekModelClient:
 
     def _llm_error_fallback_enabled(self) -> bool:
         env = os.getenv("MAS_LLM_ERROR_FALLBACK")
-        if env is not None:
-            return env.lower() in {"1", "true", "yes", "y"}
-        return self.provider_name.lower() in {"vllm", "qwen"}
+        if env is None:
+            return False
+        return env.lower() in {"1", "true", "yes", "y"}
 
     def _fallback_content(
         self,
@@ -201,6 +203,9 @@ class DeepSeekModelClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        seed = kwargs.get("seed")
+        if seed is not None:
+            payload["seed"] = int(seed)
         cache_path = self._cache_path(str(model))
         cache_key = self._cache_key(payload)
         if self._cache_enabled():
@@ -386,7 +391,7 @@ class BaseAgent:
         return ""
 
     def build_messages(self, state: dict[str, Any]) -> list[dict[str, str]]:
-        task = state.get("task", {})
+        task = public_task_view(state.get("task", {}) or {})
         history = state.get("messages", [])
         history_text = "\n".join(
             f"{item.get('sender')}: {item.get('content')}" for item in history[-8:]
@@ -397,13 +402,15 @@ class BaseAgent:
             f"Dataset: {task.get('dataset')}",
             f"Prompt:\n{task.get('prompt', '')}",
         ]
+        if task.get("context"):
+            task_details.append(f"Context:\n{task.get('context')}")
+        if task.get("output_format"):
+            task_details.append(f"Output format: {task.get('output_format')}")
         output_instruction = self._dataset_output_instruction(dataset)
         if output_instruction:
             task_details.append(output_instruction)
         if task.get("entry_point"):
             task_details.append(f"Required entry point: {task.get('entry_point')}")
-        if task.get("tests") and dataset not in {"arc_agi_2"}:
-            task_details.append(f"Visible tests/assertions:\n{task.get('tests')}")
         permission_lines = [
             f"- {name}: {str(value).lower()}"
             for name, value in sorted(self.permissions.items())
@@ -483,6 +490,8 @@ class BaseAgent:
             # Keeping completion short prevents vLLM context overflow on 16k servers.
             current_max_tokens = model_kwargs.get("max_tokens")
             model_kwargs["max_tokens"] = min(int(current_max_tokens or 256), 256)
+        if model_kwargs.get("seed") is None and state.get("seed") is not None:
+            model_kwargs["seed"] = int(state["seed"])
         content = self.model_client.complete(
             messages,
             role=self.role,

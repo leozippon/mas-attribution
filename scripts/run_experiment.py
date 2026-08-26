@@ -35,9 +35,6 @@ EXPERIMENT_ALIASES = {
     "exp01_full_system": "configs/experiments/exp01_full_system.yaml",
     "exp02_single_agent_baseline": "configs/experiments/exp02_single_agent_baseline.yaml",
     "exp03_loo_attribution": "configs/experiments/exp03_loo_attribution.yaml",
-    "exp01_qwen_all_tasksets": "configs/experiments/exp01_qwen_all_tasksets.yaml",
-    "exp02_qwen_all_tasksets_single_agent_baseline": "configs/experiments/exp02_qwen_all_tasksets_single_agent_baseline.yaml",
-    "exp03_qwen_all_tasksets_loo_attribution": "configs/experiments/exp03_qwen_all_tasksets_loo_attribution.yaml",
     "exp04_shapley_attribution": "configs/experiments/exp04_shapley_attribution.yaml",
     "exp05_topology_intervention": "configs/experiments/exp05_topology_intervention.yaml",
     "exp06_role_intervention": "configs/experiments/exp06_role_intervention.yaml",
@@ -123,7 +120,7 @@ def main() -> int:
     parser.add_argument(
         "--execute-code",
         action="store_true",
-        help="Run HumanEval/MBPP code tests through the configured sandbox.",
+        help="Run unit-test code evaluation through the configured sandbox.",
     )
     parser.add_argument(
         "--sandbox-backend",

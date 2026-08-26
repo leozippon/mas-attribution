@@ -1,14 +1,15 @@
-"""Run task- and communication-conditioned generalization analysis.
+"""Run task- and communication-conditioned descriptive summaries.
 
-Exp08 is analysis-only by design. It reuses existing task metadata, scores,
-attribution records, and traces produced by Exp01-Exp07, then asks whether
-agent contribution patterns change with task conditions and communication
-behavior. No LLM calls are made here.
+Exp08 is analysis-only by design. It derives selected-task metadata from the
+configured normalized task files, then joins existing attribution records and
+traces produced by Exp03-Exp07. Score files are not used as covariates. No LLM
+calls are made. Communication summaries and correlations are descriptive and
+non-causal.
 
-The configured task metadata file and every path listed in inputs.score_files,
-attribution_files, coalition_files, and trace_files must exist and be non-empty.
-The run also fails if no metadata rows are selected or no attribution rows load
-for those tasks.
+Every configured dataset task_file and every path listed in
+inputs.attribution_files, coalition_files, and trace_files must exist and be
+non-empty. The run also fails if no metadata rows are selected or no
+attribution rows load for those tasks.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from mas_contribution_bench.config import ExperimentSpec
-from mas_contribution_bench.runners.common import load_experiment
+from mas_contribution_bench.runners.common import load_experiment, select_tasks
 from mas_contribution_bench.utils.io import ensure_dir, iter_jsonl, write_jsonl
 
 
@@ -39,10 +40,17 @@ def _display_path(root: Path, path: Path) -> str:
 
 
 REQUIRED_INPUT_FILE_KEYS = (
-    "score_files",
     "attribution_files",
     "coalition_files",
     "trace_files",
+)
+
+BANNED_TASK_CONDITION_AXES = frozenset(
+    {
+        "single_agent_success_bin",
+        "full_mas_success_bin",
+        "dominant_failure_type",
+    }
 )
 
 
@@ -50,20 +58,18 @@ def _resolve_paths(root: Path, values: Iterable[str | Path]) -> list[Path]:
     return [_as_path(root, value) for value in values]
 
 
-def _task_metadata_path(root: Path, raw: dict[str, Any]) -> Path:
-    analysis_cfg = raw.get("analysis") or {}
-    input_cfg = raw.get("inputs") or {}
-    metadata_file = (
-        analysis_cfg.get("task_metadata_file")
-        or input_cfg.get("task_metadata_file")
-        or "data/processed/metadata/task_metadata.jsonl"
-    )
-    return _as_path(root, metadata_file)
+def _dataset_task_paths(root: Path, raw: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+    for dataset in raw.get("datasets") or []:
+        task_file = dataset.get("task_file") if isinstance(dataset, dict) else None
+        if task_file:
+            paths.append(_as_path(root, task_file))
+    return paths
 
 
 def _listed_input_paths(root: Path, raw: dict[str, Any]) -> list[tuple[str, Path]]:
     input_cfg = raw.get("inputs") or {}
-    listed = [("task_metadata_file", _task_metadata_path(root, raw))]
+    listed = [("task_file", path) for path in _dataset_task_paths(root, raw)]
     for key in REQUIRED_INPUT_FILE_KEYS:
         for value in input_cfg.get(key) or []:
             listed.append((key, _as_path(root, value)))
@@ -79,8 +85,8 @@ def _preflight_required_inputs(root: Path, raw: dict[str, Any]) -> None:
             problems.append(f"{label} empty: {path}")
     if problems:
         raise FileNotFoundError(
-            "exp08 generalization requires the configured task metadata file and every "
-            "path listed in inputs.score_files, attribution_files, coalition_files, and "
+            "exp08 generalization requires every configured dataset task_file and every "
+            "path listed in inputs.attribution_files, coalition_files, and "
             "trace_files to exist and be non-empty. "
             + "; ".join(problems)
         )
@@ -123,17 +129,6 @@ def _bin_prompt_length(length: Any) -> str:
     return "very_long_>2000"
 
 
-def _bin_score(score: Any) -> str:
-    value = _safe_float(score, -1.0)
-    if value >= 0.999:
-        return "pass"
-    if value <= 0.001:
-        return "fail"
-    if value >= 0:
-        return "partial"
-    return "unknown"
-
-
 def _bin_count(value: Any, *, small: int, medium: int, label: str) -> str:
     n = int(_safe_float(value, 0))
     if n <= small:
@@ -143,122 +138,39 @@ def _bin_count(value: Any, *, small: int, medium: int, label: str) -> str:
     return f"{label}_high_>{medium}"
 
 
-def _metadata_extra(row: dict[str, Any], key: str, default: Any = None) -> Any:
-    metadata = row.get("metadata") or {}
-    return metadata.get(key, default)
-
-
-def _configured_datasets(experiment: ExperimentSpec, max_tasks: int | None) -> dict[str, int | None]:
-    configured = {}
-    for dataset in experiment.raw.get("datasets", []):
-        name = str(dataset.get("name"))
-        if not name:
-            continue
-        configured[name] = max_tasks if max_tasks is not None else dataset.get("max_tasks")
-    return configured
+def _task_to_metadata(task: dict[str, Any]) -> dict[str, Any]:
+    difficulty = task.get("difficulty") or {}
+    if not isinstance(difficulty, dict):
+        difficulty = {}
+    prompt = str(task.get("prompt") or "")
+    prompt_length = len(prompt)
+    return {
+        "task_id": str(task.get("task_id") or ""),
+        "dataset": str(task.get("dataset") or "unknown"),
+        "split": str(task.get("split") or ""),
+        "task_type": str(task.get("task_type") or "unknown"),
+        "prompt_length": prompt_length,
+        "prompt_length_bin": _bin_prompt_length(prompt_length),
+        "difficulty_level": str(difficulty.get("level") or "unknown"),
+        "input_length": difficulty.get("input_length") or prompt_length,
+        "metadata_source": "configured_task_file",
+    }
 
 
 def _select_task_metadata(
     experiment: ExperimentSpec,
     max_tasks: int | None,
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
-    root = experiment.benchmark.project_root
-    metadata_path = _task_metadata_path(root, experiment.raw)
-    dataset_limits = _configured_datasets(experiment, max_tasks)
-    dataset_splits = {
-        str(dataset.get("name")): dataset.get("split")
-        for dataset in experiment.raw.get("datasets", [])
-        if dataset.get("name")
-    }
-    seen_by_dataset: dict[str, int] = defaultdict(int)
+    selected = select_tasks(experiment)
+    if max_tasks is not None:
+        selected = selected[:max_tasks]
     metadata_by_task: dict[str, dict[str, Any]] = {}
-
-    for row in iter_jsonl(metadata_path):
-        dataset = str(row.get("dataset"))
-        if dataset_limits and dataset not in dataset_limits:
-            continue
-        split = dataset_splits.get(dataset)
-        if split and str(row.get("split")) != str(split):
-            continue
-        limit = dataset_limits.get(dataset)
-        if limit is not None and seen_by_dataset[dataset] >= int(limit):
-            continue
-        task_id = str(row.get("task_id"))
+    for task in selected:
+        task_id = str(task.get("task_id") or "")
         if not task_id:
             continue
-        row = dict(row)
-        row["prompt_length_bin"] = _bin_prompt_length(row.get("prompt_length") or row.get("input_length"))
-        row["difficulty_level"] = str(row.get("difficulty_level") or "unknown")
-        row["task_type"] = str(row.get("task_type") or "unknown")
-        metadata_by_task[task_id] = row
-        seen_by_dataset[dataset] += 1
-
+        metadata_by_task[task_id] = _task_to_metadata(task)
     return metadata_by_task, set(metadata_by_task)
-
-
-def _load_score_context(
-    root: Path,
-    score_files: list[str],
-    selected_tasks: set[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    score_by_run_id: dict[str, dict[str, Any]] = {}
-    by_task: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {
-            "baseline_scores": [],
-            "full_scores": [],
-            "all_scores": [],
-            "failure_types": Counter(),
-        }
-    )
-
-    for path in _resolve_paths(root, score_files):
-        source_file = _display_path(root, path)
-        for row in iter_jsonl(path):
-            task_id = str(row.get("task_id"))
-            if task_id not in selected_tasks:
-                continue
-            run_id = str(row.get("run_id") or "")
-            score = _safe_float(row.get("score"))
-            architecture = str(row.get("architecture_id") or "")
-            failure_type = str(row.get("failure_type") or "unknown")
-            dataset = str(row.get("dataset") or "")
-            slim = {
-                "run_id": run_id,
-                "task_id": task_id,
-                "dataset": dataset,
-                "architecture_id": architecture,
-                "score": score,
-                "passed": bool(row.get("passed")),
-                "failure_type": failure_type,
-                "source_file": source_file,
-                "cost": row.get("cost") or {},
-            }
-            if run_id:
-                score_by_run_id[run_id] = slim
-            ctx = by_task[task_id]
-            ctx["all_scores"].append(score)
-            ctx["failure_types"][failure_type] += 1
-            if source_file.endswith("baseline_scores.jsonl") or architecture.startswith(
-                ("single_agent", "solo_role", "random_team")
-            ):
-                ctx["baseline_scores"].append(score)
-            if source_file.endswith("full_system_scores.jsonl") or architecture.startswith("A"):
-                if "intervention" not in source_file and "exp03" not in source_file and "exp04" not in source_file:
-                    ctx["full_scores"].append(score)
-
-    task_context: dict[str, dict[str, Any]] = {}
-    for task_id, ctx in by_task.items():
-        baseline_best = max(ctx["baseline_scores"]) if ctx["baseline_scores"] else None
-        full_best = max(ctx["full_scores"]) if ctx["full_scores"] else None
-        failure_type = ctx["failure_types"].most_common(1)[0][0] if ctx["failure_types"] else "unknown"
-        task_context[task_id] = {
-            "single_agent_best_score": baseline_best,
-            "single_agent_success_bin": _bin_score(baseline_best),
-            "full_mas_best_score": full_best,
-            "full_mas_success_bin": _bin_score(full_best),
-            "dominant_failure_type": failure_type,
-        }
-    return score_by_run_id, task_context
 
 
 def _load_trace_stats(
@@ -340,7 +252,6 @@ def _load_attribution_rows(
     attribution_files: list[str],
     selected_tasks: set[str],
     metadata_by_task: dict[str, dict[str, Any]],
-    task_context: dict[str, dict[str, Any]],
     trace_stats: dict[str, dict[str, Any]],
     coalition_run_map: dict[str, str],
 ) -> list[dict[str, Any]]:
@@ -352,7 +263,6 @@ def _load_attribution_rows(
             if task_id not in selected_tasks:
                 continue
             metadata = metadata_by_task.get(task_id, {})
-            context = task_context.get(task_id, {})
             row_metadata = row.get("metadata") or {}
             full_run_id = row_metadata.get("full_run_id") or coalition_run_map.get(
                 str(row_metadata.get("full_coalition_id") or "")
@@ -369,9 +279,6 @@ def _load_attribution_rows(
                     "task_type": str(metadata.get("task_type") or "unknown"),
                     "difficulty_level": str(metadata.get("difficulty_level") or "unknown"),
                     "prompt_length_bin": str(metadata.get("prompt_length_bin") or "unknown"),
-                    "single_agent_success_bin": str(context.get("single_agent_success_bin") or "unknown"),
-                    "full_mas_success_bin": str(context.get("full_mas_success_bin") or "unknown"),
-                    "dominant_failure_type": str(context.get("dominant_failure_type") or "unknown"),
                     "experiment_source": str(row.get("experiment_id") or "unknown"),
                     "source_file": source_file,
                     "architecture_id": str(row.get("architecture_id") or "unknown"),
@@ -435,6 +342,8 @@ def _communication_slices(rows: list[dict[str, Any]], axes: list[str]) -> list[d
         for record in _group_mean(rows, keys):
             record["axis"] = axis
             record["axis_value"] = record.pop(axis)
+            record["analysis_kind"] = "descriptive_non_causal"
+            record["causal_claim"] = False
             output.append(record)
     return output
 
@@ -488,6 +397,8 @@ def _communication_correlations(rows: list[dict[str, Any]]) -> list[dict[str, An
                     "metric": metric,
                     "n": len(group),
                     "pearson_r": round(corr, 6) if corr is not None else None,
+                    "analysis_kind": "descriptive_non_causal",
+                    "causal_claim": False,
                 }
             )
     return output
@@ -533,15 +444,13 @@ def run_generalization(config_path: str | Path, max_tasks: int | None = None) ->
     if not metadata_by_task:
         raise ValueError(
             "exp08 generalization selected 0 task metadata rows. "
-            "Check datasets/splits against the configured task metadata file."
+            "Check datasets/splits against the configured normalized task files."
         )
     input_cfg = experiment.raw.get("inputs") or {}
     attribution_files = list(input_cfg.get("attribution_files") or [])
     coalition_files = list(input_cfg.get("coalition_files") or [])
-    score_files = list(input_cfg.get("score_files") or [])
     trace_files = list(input_cfg.get("trace_files") or [])
 
-    score_by_run_id, task_context = _load_score_context(root, score_files, selected_tasks)
     trace_stats = _load_trace_stats(root, trace_files, selected_tasks)
     coalition_run_map = _load_coalition_run_map(root, coalition_files, selected_tasks)
     attribution_rows = _load_attribution_rows(
@@ -549,7 +458,6 @@ def run_generalization(config_path: str | Path, max_tasks: int | None = None) ->
         attribution_files,
         selected_tasks,
         metadata_by_task,
-        task_context,
         trace_stats,
         coalition_run_map,
     )
@@ -564,13 +472,16 @@ def run_generalization(config_path: str | Path, max_tasks: int | None = None) ->
         or [
             "dataset",
             "difficulty_level",
-            "single_agent_success_bin",
-            "full_mas_success_bin",
-            "dominant_failure_type",
             "prompt_length_bin",
             "task_type",
         ]
     )
+    banned = sorted(axis for axis in task_axes if axis in BANNED_TASK_CONDITION_AXES)
+    if banned:
+        raise ValueError(
+            "exp08 generalization rejects post-treatment task-condition axes: "
+            + ", ".join(banned)
+        )
     communication_axes = list(
         analysis_cfg.get("communication_condition_axes")
         or [
@@ -626,7 +537,7 @@ def run_generalization(config_path: str | Path, max_tasks: int | None = None) ->
     return {
         "experiment_id": experiment.experiment_id,
         "selected_tasks": len(metadata_by_task),
-        "score_runs": len(score_by_run_id),
+        "score_runs": 0,
         "trace_runs": len(trace_stats),
         "coalition_run_map_entries": len(coalition_run_map),
         "attribution_rows": len(attribution_rows),

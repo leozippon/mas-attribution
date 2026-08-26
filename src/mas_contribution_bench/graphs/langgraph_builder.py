@@ -201,29 +201,36 @@ class MASGraphBuilder:
 
     def _default_final_answer(self, state: dict[str, Any], order: list[str]) -> str:
         final_role = self._final_role(order)
-        if final_role and final_role in state["agent_outputs"]:
-            output = state["agent_outputs"][final_role]
-            if not self._respect_final_answer_permission(state) or self._has_final_answer_permission(output):
-                self._record_final_answer_choice(
-                    state,
-                    source_role=final_role,
-                    fallback_used=False,
-                )
-                return str(output.get("content", ""))
+        terminal_output = state.get("agent_outputs", {}).get(final_role) if final_role else None
+        if not isinstance(terminal_output, dict) or self._is_null_output(terminal_output):
+            self._record_final_answer_choice(
+                state,
+                source_role=final_role,
+                fallback_used=False,
+            )
+            return ""
+        output = terminal_output
+        if not self._respect_final_answer_permission(state) or self._has_final_answer_permission(output):
+            self._record_final_answer_choice(
+                state,
+                source_role=final_role,
+                fallback_used=False,
+            )
+            return str(output.get("content", ""))
 
         unauthorized_candidates = []
         if self._respect_final_answer_permission(state):
             for role in reversed(order):
-                output = state.get("agent_outputs", {}).get(role)
-                if self._is_null_output(output):
+                candidate = state.get("agent_outputs", {}).get(role)
+                if not isinstance(candidate, dict) or self._is_null_output(candidate):
                     continue
-                if self._has_final_answer_permission(output):
+                if self._has_final_answer_permission(candidate):
                     self._record_final_answer_choice(
                         state,
                         source_role=role,
                         fallback_used=True,
                     )
-                    return str(output.get("content", ""))
+                    return str(candidate.get("content", ""))
                 unauthorized_candidates.append(role)
 
         if self._strict_final_answer_permission(state):

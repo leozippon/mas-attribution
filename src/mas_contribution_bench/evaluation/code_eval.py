@@ -7,7 +7,7 @@ import re
 import string
 from typing import Any
 
-from mas_contribution_bench.data.schemas import EvaluationRecord, EvaluatorType, FailureType
+from mas_contribution_bench.data.schemas import CostInfo, EvaluationRecord, EvaluatorType, FailureType
 from mas_contribution_bench.evaluation.humaneval_eval import evaluate_humaneval
 from mas_contribution_bench.evaluation.mbpp_eval import evaluate_mbpp
 from mas_contribution_bench.evaluation.official_task_eval import evaluate_official_answer_task
@@ -85,48 +85,6 @@ def score_multiple_choice_or_exact(task: dict[str, Any], prediction: str | None)
             "reference": str(reference),
         }
     return 0.0, False, FailureType.UNKNOWN, {"evaluator": "text_fallback", "reason": "missing_reference"}
-
-
-def score_ifbench(task: dict[str, Any], prediction: str | None) -> tuple[float, bool, FailureType, dict[str, Any]]:
-    answer = _extract_artifact_or_answer(prediction)
-    if not answer.strip():
-        return 0.0, False, FailureType.EMPTY_OUTPUT, {"evaluator": "ifbench_rule_subset"}
-    metadata = task.get("metadata") or {}
-    instruction_ids = list(metadata.get("instruction_id_list") or [])
-    kwargs_list = list(metadata.get("kwargs") or [])
-    checks: list[bool] = []
-    details: list[dict[str, Any]] = []
-    for idx, instruction_id in enumerate(instruction_ids):
-        params = kwargs_list[idx] if idx < len(kwargs_list) and isinstance(kwargs_list[idx], dict) else {}
-        passed = True
-        if instruction_id == "punctuation:no_comma":
-            passed = "," not in answer and "，" not in answer
-        elif instruction_id == "detectable_format:number_highlighted_sections":
-            required = int(params.get("num_highlights", 0) or 0)
-            passed = len(re.findall(r"\*[^*]+\*", answer)) >= required
-        elif instruction_id == "length_constraints:number_words":
-            required = int(params.get("num_words", 0) or 0)
-            relation = str(params.get("relation", "at least")).lower()
-            count = len(re.findall(r"\b\w+\b", answer))
-            if "at least" in relation:
-                passed = count >= required
-            elif "at most" in relation:
-                passed = count <= required
-            else:
-                passed = count == required
-            details.append({"instruction_id": instruction_id, "word_count": count, "required": required, "relation": relation, "passed": passed})
-            checks.append(passed)
-            continue
-        else:
-            details.append({"instruction_id": instruction_id, "passed": None, "reason": "unsupported_rule"})
-            continue
-        details.append({"instruction_id": instruction_id, "passed": passed})
-        checks.append(passed)
-    if not checks:
-        return 0.0, False, FailureType.UNKNOWN, {"evaluator": "ifbench_rule_subset", "reason": "no_supported_rules", "details": details}
-    score = sum(1 for item in checks if item) / len(checks)
-    passed = score == 1.0
-    return score, passed, (FailureType.NONE if passed else FailureType.TEST_FAILURE), {"evaluator": "ifbench_rule_subset", "details": details}
 
 
 def failure_type_from_sandbox(result: SandboxResult) -> FailureType:
@@ -217,14 +175,33 @@ def evaluate_task_output(
     sandbox_backend: str = "auto",
 ) -> EvaluationRecord:
     evaluator_type = _evaluator_type_name(task)
-    if evaluator_type == EvaluatorType.UNIT_TEST.value and not execute_code:
+    dataset = str(task.get("dataset", "")).lower()
+    official = evaluate_official_answer_task(task, final_answer) if dataset in {
+        "aime_2026",
+        "gpqa_diamond",
+        "hle",
+        "arc_agi_2",
+        "ifbench",
+    } else None
+    extra_metadata: dict[str, Any] = {}
+    if official is not None:
+        score, passed, failure_type, raw_output = official
+    elif dataset in {"livecodebench", "swebench_verified"}:
+        score, passed, failure_type = None, None, FailureType.NONE
+        raw_output = {
+            "evaluator": "not_integrated",
+            "status": "unscored",
+            "reason": "official harness is not integrated in evaluate_task_output",
+        }
+        extra_metadata = {"scoring": "not_integrated", "unscored": True}
+    elif evaluator_type == EvaluatorType.UNIT_TEST.value and not execute_code:
         raise ValueError(
             "Refusing to emit EvaluationRecord: evaluator_type='unit_test' requires code "
             f"execution (metric={_evaluation_field(task, 'metric')!r}). Enable --execute-code; "
             "formal runs should use Docker. Text equality is not pass@1 and will not be used "
             "as a silent fallback."
         )
-    if execute_code:
+    elif execute_code:
         score, passed, failure_type, raw_output = evaluate_code_prediction(
             task,
             final_answer,
@@ -233,6 +210,7 @@ def evaluate_task_output(
     else:
         score, passed, failure_type = score_text_answer(final_answer, task.get("reference_solution"))
         raw_output = {"safe_mode": True, "code_execution": False}
+    metric = _evaluation_field(task, "metric") or "pass_at_1"
     return EvaluationRecord(
         run_id=run_id,
         task_id=task["task_id"],
@@ -240,10 +218,11 @@ def evaluate_task_output(
         architecture_id=architecture_id,
         final_answer=final_answer,
         score=score,
-        metric=(task.get("evaluation") or {}).get("metric", "pass_at_1"),
+        metric=metric,
         passed=passed,
         failure_type=failure_type,
         evaluator=task["evaluation"],
-        cost=cost,
+        cost=CostInfo.model_validate(cost or {}),
         raw_evaluator_output=raw_output,
+        metadata=extra_metadata,
     )

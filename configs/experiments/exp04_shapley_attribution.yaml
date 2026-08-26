@@ -1,25 +1,39 @@
 id: exp04_shapley_attribution
 stage: 4
 name: Sampled Shapley and Banzhaf attribution
-purpose: Compare LOO with coalition-based attribution and test when LOO ranking breaks.
-
+purpose: >
+  Compare LOO with modest sampled Shapley and sampled Banzhaf on the five
+  locally scored datasets. LiveCodeBench and SWE-bench Verified are
+  excluded because they remain score=None/passed=None in-loop.
 depends_on:
   - exp01_full_system
   - exp03_loo_attribution
-
 datasets:
-  - name: humaneval
-    task_file: data/processed/tasks/humaneval_tasks.jsonl
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
     split: test
-    max_tasks: 50
-    task_selection: stratified_by_difficulty
-
-  - name: mbpp
-    task_file: data/processed/tasks/mbpp_tasks.jsonl
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
     split: test
-    max_tasks: 100
-    task_selection: stratified_by_difficulty
-
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
 architectures:
   include:
     - A1_pev
@@ -27,57 +41,55 @@ architectures:
     - A3_dag
     - A5_star
     - A6_debate
-
 attribution:
   methods:
     - shapley_sampled
     - banzhaf_sampled
-
   utility: task
   removal_protocol: null_agent_replacement
-
+  reuse_full_system_runs: false
   shapley:
     num_permutations: 8
     coalition_cache: true
-
   banzhaf:
     num_coalitions: 8
     coalition_cache: true
-
   save_coalition_scores: true
-
-analysis:
-  compare_with: exp03_loo_attribution
-  rank_metrics:
-    - spearman
-    - kendall_tau
-    - top1_match
-    - top2_overlap
-
 seeds:
   - 0
   - 1
   - 2
-
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
 outputs:
-  run_dir: data/runs/shapley
-  trace_dir: data/traces/shapley
-  attribution_file: data/results/attribution/shapley_banzhaf_attribution.jsonl
-  coalition_file: data/results/attribution/coalition_scores.jsonl
-  comparison_file: data/results/statistics/loo_shapley_consistency.jsonl
-
+  run_dir: data/runs/exp04
+  trace_dir: data/traces/exp04
+  attribution_file: data/results/exp04/shapley_banzhaf_attribution.jsonl
+  coalition_file: data/results/exp04/coalition_scores.jsonl
+  score_file: data/results/exp04/scores.jsonl
 benchmark_specs:
   architecture_dir: configs/benchmark_specs/architectures
   agent_dir: configs/benchmark_specs/agents
   prompt_dir: configs/benchmark_specs/prompts
   permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
-
 model:
-  name: ${MODEL_NAME}
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 2
+  managed_externally: true
+  managed_by: zhangqy
   homogeneous: true
   temperature: 0.2
   max_tokens: 2048
-
+  timeout_seconds: 180
 logging:
   save_run_records: true
   save_full_trace: true
@@ -89,8 +101,8 @@ logging:
     - design_graph
     - trace_graph
     - dependency_graph
-
 evaluation:
   primary_utility: task
-  code_task_metric: pass_at_1
-  bootstrap_confidence_interval: true
+  notes: >
+    Only locally scored datasets are eligible for attribution.
+    Prediction/export-only datasets are excluded.

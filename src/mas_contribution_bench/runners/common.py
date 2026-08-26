@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import random
 import shutil
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from mas_contribution_bench.agents import DeepSeekModelClient, DryRunModelClient, OpenAICompatibleModelClient, build_agents
@@ -17,6 +19,7 @@ from mas_contribution_bench.data.schemas import (
     RemovalProtocol,
     RunRecord,
     RunStatus,
+    TaskRecord,
 )
 from mas_contribution_bench.evaluation import evaluate_task_output
 from mas_contribution_bench.graphs import MASGraphBuilder
@@ -33,6 +36,7 @@ OPENAI_COMPATIBLE_BACKENDS = frozenset(
 )
 WIRED_ATTRIBUTION_METHODS = frozenset({"loo", "shapley_sampled", "banzhaf_sampled"})
 WIRED_INTERVENTION_METHODS = frozenset({"loo", "shapley_sampled"})
+ALLOWED_PERMISSION_TOGGLES = frozenset({"write_solution", "final_answer"})
 METHOD_ALIASES = {
     "sampled_shapley": "shapley_sampled",
     "sampled_banzhaf": "banzhaf_sampled",
@@ -94,7 +98,12 @@ def build_model_client(experiment: ExperimentSpec):
         return OpenAICompatibleModelClient(
             default_model=default_model,
             base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("VLLM_BASE_URL") or model_cfg.get("base_url") or "http://127.0.0.1:8000/v1",
-            api_key=os.getenv("OPENAI_API_KEY") or os.getenv("VLLM_API_KEY") or "dummy",
+            api_key=(
+                os.getenv("OPENAI_API_KEY")
+                or os.getenv("VLLM_API_KEY")
+                or model_cfg.get("api_key")
+                or "dummy"
+            ),
             timeout_seconds=float(os.getenv("OPENAI_TIMEOUT") or os.getenv("VLLM_TIMEOUT") or model_cfg.get("timeout_seconds", 120)),
             max_retries=int(os.getenv("OPENAI_MAX_RETRIES") or os.getenv("VLLM_MAX_RETRIES") or model_cfg.get("max_retries", 3)),
             retry_backoff_seconds=float(os.getenv("OPENAI_RETRY_BACKOFF") or os.getenv("VLLM_RETRY_BACKOFF") or model_cfg.get("retry_backoff_seconds", 2.0)),
@@ -186,6 +195,39 @@ def listed_attribution_methods(
     return list(default or [])
 
 
+def validate_permission_toggles(names: Iterable[str], *, context: str) -> None:
+    illegal = sorted({str(name) for name in names if str(name) not in ALLOWED_PERMISSION_TOGGLES})
+    if not illegal:
+        return
+    raise ValueError(
+        f"{context} may only toggle write_solution or final_answer; "
+        f"unsupported toggle(s): {', '.join(illegal)}."
+    )
+
+
+def require_evaluation_score(evaluation: Any, *, dataset: Any = None, task_id: Any = None) -> float:
+    if isinstance(evaluation, Mapping):
+        score = evaluation.get("score")
+        dataset_name = dataset if dataset is not None else evaluation.get("dataset", "unknown")
+        task_name = task_id if task_id is not None else evaluation.get("task_id", "unknown")
+    else:
+        score = getattr(evaluation, "score", None)
+        dataset_name = dataset if dataset is not None else getattr(evaluation, "dataset", "unknown")
+        task_name = task_id if task_id is not None else getattr(evaluation, "task_id", "unknown")
+    if score is None:
+        raise ValueError(
+            f"Cannot compute attribution for dataset={dataset_name} task={task_name}: "
+            "score is None. Prediction/export-only datasets cannot be used for attribution."
+        )
+    try:
+        return float(score)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot compute attribution for dataset={dataset_name} task={task_name}: "
+            f"score={score!r} is not numeric."
+        ) from exc
+
+
 def validate_attribution_methods(
     methods: list[str],
     supported: set[str] | frozenset[str],
@@ -223,19 +265,123 @@ def load_experiment(config_path: str | Path, project_root: str | Path = PROJECT_
     return load_experiment_spec(config_path, project_root)
 
 
+TASK_SELECTION_STRATEGIES = frozenset(
+    {"deterministic_first", "seeded_random", "stratified_by_difficulty"}
+)
+
+
+def _dataset_selection_seed(name: str) -> int:
+    acc = 0
+    for char in name:
+        acc = (acc * 31 + ord(char)) & 0x7FFFFFFF
+    return acc
+
+
+def _selection_seed(dataset_spec: dict[str, Any], experiment: ExperimentSpec) -> int:
+    if dataset_spec.get("selection_seed") is not None:
+        return int(dataset_spec["selection_seed"])
+    sampling = experiment.raw.get("sampling") or {}
+    if sampling.get("selection_seed") is not None:
+        return int(sampling["selection_seed"])
+    name = str(dataset_spec.get("name") or dataset_spec.get("task_file") or "dataset")
+    return _dataset_selection_seed(name)
+
+
+def _difficulty_level(task: TaskRecord) -> str:
+    difficulty = getattr(task, "difficulty", None)
+    level = getattr(difficulty, "level", None) if difficulty is not None else None
+    return str(level or "unknown")
+
+
+def _stratified_by_difficulty(tasks: list[TaskRecord], max_tasks: int, seed: int) -> list[TaskRecord]:
+    if max_tasks >= len(tasks):
+        return list(tasks)
+    groups: dict[str, list[TaskRecord]] = {}
+    for task in tasks:
+        groups.setdefault(_difficulty_level(task), []).append(task)
+    rng = random.Random(seed)
+    order = sorted(groups)
+    shuffled: dict[str, list[TaskRecord]] = {}
+    for level in order:
+        items = list(groups[level])
+        rng.shuffle(items)
+        shuffled[level] = items
+    total = len(tasks)
+    alloc = {level: (max_tasks * len(shuffled[level])) // total for level in order}
+    assigned = sum(alloc.values())
+    remainders = sorted(
+        order,
+        key=lambda level: (-(len(shuffled[level]) * max_tasks - alloc[level] * total), level),
+    )
+    index = 0
+    while assigned < max_tasks and remainders:
+        level = remainders[index % len(remainders)]
+        if alloc[level] < len(shuffled[level]):
+            alloc[level] += 1
+            assigned += 1
+        index += 1
+        if index > max_tasks * len(remainders) + 8:
+            break
+    selected: list[TaskRecord] = []
+    for level in order:
+        selected.extend(shuffled[level][: alloc[level]])
+    return selected
+
+
+def _apply_task_selection(
+    tasks: list[TaskRecord],
+    strategy: str,
+    max_tasks: int | None,
+    selection_seed: int,
+) -> list[TaskRecord]:
+    if max_tasks is None:
+        return list(tasks)
+    limit = int(max_tasks)
+    if limit <= 0:
+        return []
+    if strategy == "deterministic_first":
+        return list(tasks[:limit])
+    if strategy == "seeded_random":
+        shuffled = list(tasks)
+        random.Random(selection_seed).shuffle(shuffled)
+        return shuffled[:limit]
+    if strategy == "stratified_by_difficulty":
+        return _stratified_by_difficulty(tasks, limit, selection_seed)
+    raise ValueError(
+        f"Unknown task_selection strategy {strategy!r}. "
+        f"Supported: {', '.join(sorted(TASK_SELECTION_STRATEGIES))}."
+    )
+
+
 def select_tasks(experiment: ExperimentSpec, seed: int | None = None) -> list[dict[str, Any]]:
-    tasks = []
+    del seed  # run seeds must not change the selected task IDs
+    tasks: list[dict[str, Any]] = []
     root = experiment.benchmark.project_root
+    sampling = experiment.raw.get("sampling") or {}
     for dataset_spec in experiment.raw.get("datasets", []):
         task_file = root / dataset_spec["task_file"]
         loaded = load_jsonl_tasks(task_file)
+        assert isinstance(loaded, list)
         split = dataset_spec.get("split")
         if split:
             loaded = [task for task in loaded if task.split == split]
-        max_tasks = dataset_spec.get("max_tasks")
-        if max_tasks is not None:
-            loaded = loaded[: int(max_tasks)]
-        tasks.extend(task.model_dump(mode="json") for task in loaded)
+        strategy = str(
+            dataset_spec.get("task_selection")
+            or sampling.get("task_selection")
+            or "deterministic_first"
+        )
+        if strategy not in TASK_SELECTION_STRATEGIES:
+            raise ValueError(
+                f"Unknown task_selection strategy {strategy!r}. "
+                f"Supported: {', '.join(sorted(TASK_SELECTION_STRATEGIES))}."
+            )
+        selected = _apply_task_selection(
+            loaded,
+            strategy,
+            dataset_spec.get("max_tasks"),
+            _selection_seed(dataset_spec, experiment),
+        )
+        tasks.extend(task.model_dump(mode="json") for task in selected)
     return tasks
 
 
@@ -259,6 +405,13 @@ def run_mas_once(
     permission_overrides: dict[str, dict[str, bool]] | None = None,
     condition_id: str | None = None,
 ) -> tuple[RunRecord, list[Any], Any]:
+    if permission_overrides:
+        toggle_names = [
+            str(name)
+            for overrides in permission_overrides.values()
+            for name in overrides
+        ]
+        validate_permission_toggles(toggle_names, context="permission intervention")
     set_seed(seed)
     architecture = experiment.benchmark.architectures[architecture_id]
     active_roles = [role for role in architecture.roles if role not in (removed_agents or set())]
@@ -268,11 +421,13 @@ def run_mas_once(
         for role in architecture.roles
     }
     functional_roles = sorted(set(architecture.roles) | set(role_map.values()))
+    model_overrides = dict(experiment.raw.get("model", {}) or {})
+    model_overrides["seed"] = int(seed)
     functional_agents = build_agents(
         experiment.benchmark.agents,
         functional_roles,
         model_client=model_client,
-        model_overrides=experiment.raw.get("model", {}),
+        model_overrides=model_overrides,
     )
     agents = {}
     for position_role in architecture.roles:
@@ -331,6 +486,7 @@ def run_mas_once(
         {
             "task": task,
             "messages": [],
+            "seed": int(seed),
             "respect_final_answer_permission": bool(permission_overrides),
             "strict_permission_enforcement": strict_permission_enforcement,
             "permission_overrides": permission_overrides or {},

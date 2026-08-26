@@ -1,7 +1,11 @@
 id: A6_debate
 name: Debate / Committee
 family: deliberative_coordination
-description: "A committee-style architecture with multiple candidate producers, critique, verification, and aggregation."
+description: >
+  A committee-style design graph with candidate producers, critique,
+  verification, and aggregation. The current graph builder executes each
+  role once in a deterministic single pass; cyclic edges are not
+  replayed as extra debate turns.
 
 roles:
   - planner
@@ -38,10 +42,11 @@ edges:
 
 orchestration:
   execution_mode: debate
-  routing_policy: committee_rounds
+  routing_policy: committee_single_pass
   aggregation_policy: aggregator_final
-  stopping_condition: aggregator_returns_consensus_or_best_answer
-  max_rounds: 2
+  stopping_condition: aggregator_returns_best_available_answer
+  max_rounds: 1
+  notes: Single-pass execution. Cyclic edges describe the design graph only.
 
 default_permissions:
   planner: planner
@@ -52,12 +57,17 @@ default_permissions:
   aggregator: aggregator
 
 recommended_datasets:
-  - humaneval
-  - mbpp
-  - multiagentbench
+  - aime_2026
+  - gpqa_diamond
+  - hle
+  - arc_agi_2
+  - ifbench
 
 attribution_notes:
-  removal_protocols: [hard_removal, null_agent_replacement, weak_model_replacement]
+  removal_protocols:
+    - hard_removal
+    - null_agent_replacement
+    - weak_model_replacement
   primary_questions:
     - "When does redundancy make LOO diverge from Shapley?"
     - "Do critic and verifier provide complementary contributions?"

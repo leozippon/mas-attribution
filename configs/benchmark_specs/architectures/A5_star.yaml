@@ -1,7 +1,11 @@
 id: A5_star
 name: Supervisor-Worker Star
 family: centralized_coordination
-description: "A star topology where a supervisor mediates communication among specialized workers, then a finalizer produces the final output."
+description: >
+  A star-shaped design graph with a supervisor and specialized workers.
+  The current graph builder executes each role once in a deterministic
+  single pass; bidirectional edges are not replayed as extra supervisor
+  turns.
 
 roles:
   - supervisor
@@ -41,10 +45,13 @@ edges:
 
 orchestration:
   execution_mode: star
-  routing_policy: supervisor_mediated
+  routing_policy: supervisor_mediated_single_pass
   aggregation_policy: supervisor_to_finalizer
   stopping_condition: finalizer_emits_executable_answer
-  max_rounds: 2
+  max_rounds: 1
+  notes: >
+    Single-pass execution. Design-graph edges are not replayed as
+    conversation rounds.
 
 default_permissions:
   supervisor: supervisor
@@ -56,18 +63,21 @@ default_permissions:
   finalizer: finalizer
 
 recommended_datasets:
-  - humaneval
-  - mbpp
-  - teambench
-  - multiagentbench
-  - marble
+  - aime_2026
+  - gpqa_diamond
+  - hle
+  - arc_agi_2
+  - ifbench
 
 attribution_notes:
-  removal_protocols: [hard_removal, null_agent_replacement, weak_model_replacement]
+  removal_protocols:
+    - hard_removal
+    - null_agent_replacement
+    - weak_model_replacement
   primary_questions:
-    - "Does high degree make the supervisor genuinely high contribution?"
-    - "How much contribution comes from routing authority and final authority?"
-    - "Can task dependencies remain plan-code-check while communication is star-shaped?"
+    - Does high degree make the supervisor genuinely high contribution?
+    - How much contribution comes from routing or final authority?
+    - Can plan-code-check stay intact on a star design graph?
 
 metadata:
   node_count: 7

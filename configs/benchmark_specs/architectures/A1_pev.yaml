@@ -1,7 +1,9 @@
 id: A1_pev
 name: Planner-Executor-Verifier
 family: linear_workflow
-description: "A minimal role-separated workflow: plan the solution, execute the main task, then verify correctness."
+description: >
+  A minimal role-separated workflow: plan the solution, execute the main
+  task, then verify correctness.
 
 roles:
   - planner
@@ -35,9 +37,13 @@ default_permissions:
   verifier: verifier
 
 recommended_datasets:
-  - humaneval
-  - mbpp
-  - teambench
+  - aime_2026
+  - gpqa_diamond
+  - hle
+  - arc_agi_2
+  - ifbench
+  - livecodebench
+  - swebench_verified
 
 attribution_notes:
   removal_protocols: [hard_removal, bypass_removal, null_agent_replacement]

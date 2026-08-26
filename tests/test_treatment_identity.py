@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,19 +28,26 @@ from mas_contribution_bench.config.loaders import (
     executable_config_bundle,
     load_experiment_spec,
 )
+from mas_contribution_bench.data.schemas import EvaluationConfig, EvaluationRecord, EvaluatorType, FailureType
 from mas_contribution_bench.runners.common import (
     WIRED_ATTRIBUTION_METHODS,
     WIRED_INTERVENTION_METHODS,
     execution_fingerprint,
     execution_treatment,
+    identity_role_map,
     listed_attribution_methods,
     mas_run_id,
+    require_evaluation_score,
+    run_mas_once,
     validate_attribution_methods,
+    validate_permission_toggles,
 )
+from mas_contribution_bench.runners.run_single_agent import _baseline_run_id, _run_baseline_once
 from mas_contribution_bench.runners.run_attribution import (
     _coalition_key,
     _loo_attribution_id,
     run_attribution,
+    run_coalition_attribution,
     run_loo_attribution,
 )
 from mas_contribution_bench.runners.run_intervention import (
@@ -368,15 +377,11 @@ class DonorReuseAndMethodTests(unittest.TestCase):
         self.assertNotIn("exp01_full_system_cache", source)
         self.assertFalse(hasattr(attribution_mod, "_full_system_score_index"))
 
-        for name in (
-            "exp03_loo_attribution.yaml",
-            "exp03_qwen_loo_attribution.yaml",
-            "exp03_qwen_all_tasksets_loo_attribution.yaml",
-            "exp03_qwen_all_tasksets_loo_attribution_smoke.yaml",
-        ):
-            text = (ROOT / "configs" / "experiments" / name).read_text(encoding="utf-8")
-            self.assertIn("reuse_full_system_runs: false", text)
-            self.assertNotIn("reuse_full_system_runs: true", text)
+        text = (ROOT / "configs" / "experiments" / "exp03_loo_attribution.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("reuse_full_system_runs: false", text)
+        self.assertNotIn("reuse_full_system_runs: true", text)
 
     def test_reuse_true_fails_before_work(self) -> None:
         body = "\n".join(
@@ -491,6 +496,219 @@ class DonorReuseAndMethodTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as intervention_ctx:
                     run_topology_intervention(intervention_path)
             self.assertIn("owen", str(intervention_ctx.exception).lower())
+
+
+class FailClosedEvaluationScoreTests(unittest.TestCase):
+    def test_none_score_names_dataset_and_rejects_export_only(self) -> None:
+        record = EvaluationRecord(
+            run_id="r1",
+            task_id="livecodebench/1",
+            dataset="livecodebench",
+            architecture_id="A1",
+            score=None,
+            metric="pass_at_1",
+            evaluator=EvaluationConfig(evaluator_type=EvaluatorType.UNIT_TEST, metric="pass_at_1"),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            require_evaluation_score(record, dataset="livecodebench", task_id="livecodebench/1")
+        message = str(ctx.exception)
+        self.assertIn("livecodebench", message)
+        self.assertIn("livecodebench/1", message)
+        self.assertIn("Prediction/export-only", message)
+        self.assertFalse(hasattr(attribution_mod, "_as_float"))
+        self.assertEqual(
+            require_evaluation_score({"score": 1.0, "dataset": "hle", "task_id": "hle/1"}),
+            1.0,
+        )
+        scored = EvaluationRecord(
+            run_id="r1",
+            task_id="livecodebench/1",
+            dataset="livecodebench",
+            architecture_id="A1",
+            score=1.0,
+            metric="pass_at_1",
+            evaluator=EvaluationConfig(evaluator_type=EvaluatorType.UNIT_TEST, metric="pass_at_1"),
+        )
+        self.assertEqual(require_evaluation_score(scored), 1.0)
+
+    def test_loo_raises_before_using_none_as_zero(self) -> None:
+        experiment = _experiment(
+            raw={
+                "id": "exp03_loo_attribution",
+                "attribution": {"method": "loo"},
+                "seeds": [0],
+                "outputs": {},
+            },
+            experiment_id="exp03_loo_attribution",
+        )
+        task = {"task_id": "livecodebench/1", "dataset": "livecodebench"}
+        evaluation = EvaluationRecord(
+            run_id="run-none",
+            task_id=task["task_id"],
+            dataset=task["dataset"],
+            architecture_id="A1",
+            score=None,
+            metric="pass_at_1",
+            evaluator=EvaluationConfig(evaluator_type=EvaluatorType.UNIT_TEST, metric="pass_at_1"),
+        )
+        run = type("Run", (), {"run_id": "run-none"})()
+        with patch.object(attribution_mod, "load_experiment", return_value=experiment):
+            with patch.object(attribution_mod, "select_tasks", return_value=[task]):
+                with patch.object(attribution_mod, "select_architectures", return_value=["A1"]):
+                    with patch.object(
+                        attribution_mod,
+                        "run_mas_once",
+                        return_value=(run, [], evaluation),
+                    ):
+                        with patch.object(
+                            attribution_mod,
+                            "append_jsonl",
+                            side_effect=AssertionError("should not persist unscored evaluation"),
+                        ):
+                            with self.assertRaises(ValueError) as ctx:
+                                run_loo_attribution("unused.yaml")
+        message = str(ctx.exception)
+        self.assertIn("livecodebench", message)
+        self.assertIn("Prediction/export-only", message)
+
+    def test_stale_cached_none_score_fails_closed_before_attribution(self) -> None:
+        experiment = _experiment(
+            raw={
+                "id": "exp04_shapley_attribution",
+                "attribution": {"methods": ["shapley_sampled"], "shapley": {"num_permutations": 1}},
+                "seeds": [0],
+                "outputs": {},
+            },
+            experiment_id="exp04_shapley_attribution",
+        )
+        task = {"task_id": "hle/1", "dataset": "hle"}
+        roles = experiment.benchmark.architectures["A1"].roles
+        fingerprint = execution_fingerprint(experiment, removal_protocol="null_agent_replacement")
+        coalition_id = _coalition_key(
+            experiment.experiment_id,
+            task["task_id"],
+            "A1",
+            0,
+            set(roles),
+            fingerprint,
+        )
+        stale = {
+            "coalition_id": coalition_id,
+            "score": None,
+            "dataset": "hle",
+            "task_id": "hle/1",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment = replace(experiment, benchmark=replace(experiment.benchmark, project_root=root))
+            coalition_path = root / f"data/results/attribution/{experiment.experiment_id}_coalitions.jsonl"
+            attribution_path = root / f"data/results/attribution/{experiment.experiment_id}.jsonl"
+            coalition_path.parent.mkdir(parents=True, exist_ok=True)
+            coalition_path.write_text(json.dumps(stale) + "\n", encoding="utf-8")
+            with patch.object(attribution_mod, "load_experiment", return_value=experiment):
+                with patch.object(attribution_mod, "select_tasks", return_value=[task]):
+                    with patch.object(attribution_mod, "select_architectures", return_value=["A1"]):
+                        with patch.object(
+                            attribution_mod,
+                            "run_mas_once",
+                            side_effect=AssertionError("should not run after stale cache"),
+                        ):
+                            with self.assertRaises(ValueError) as ctx:
+                                run_coalition_attribution("unused.yaml")
+            self.assertIn("hle", str(ctx.exception))
+            self.assertIn("score is None", str(ctx.exception))
+            self.assertFalse(attribution_path.exists())
+
+
+class PermissionRuntimeAllowlistTests(unittest.TestCase):
+    def test_runtime_overrides_reject_non_allowlisted_toggles_before_model(self) -> None:
+        with patch(
+            "mas_contribution_bench.runners.common.build_model_client",
+            side_effect=AssertionError("should not build a model client"),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                run_mas_once(
+                    _experiment(),
+                    {"task_id": "t1", "dataset": "hle", "prompt": "q"},
+                    "A1",
+                    0,
+                    permission_overrides={"coder": {"read_memory": False}},
+                )
+        message = str(ctx.exception)
+        self.assertIn("read_memory", message)
+        self.assertIn("write_solution", message)
+        validate_permission_toggles(["write_solution", "final_answer"], context="ok")
+
+
+class BaselineTreatmentIdentityTests(unittest.TestCase):
+    def test_precomputed_and_written_ids_match_and_cover_treatment(self) -> None:
+        experiment = _experiment(experiment_id="exp02_single_agent_baseline")
+        task = {"task_id": "task-1", "dataset": "hle", "prompt": "q"}
+        spec = {"id": "single_agent_coder", "type": "single_agent", "roles": ["coder"], "sample": 0}
+        env = {
+            "MAS_MODEL_BACKEND": "vllm",
+            "MODEL_NAME": "model-a",
+            "MAS_EXECUTE_CODE": "0",
+            "MAS_SANDBOX_BACKEND": "subprocess",
+        }
+        evaluation = EvaluationRecord(
+            run_id="placeholder",
+            task_id=task["task_id"],
+            dataset=task["dataset"],
+            architecture_id=spec["id"],
+            score=1.0,
+            metric="exact_match",
+            passed=True,
+            failure_type=FailureType.NONE,
+            evaluator=EvaluationConfig(evaluator_type=EvaluatorType.EXACT_MATCH, metric="exact_match"),
+        )
+        state = {"task": task, "messages": [], "agent_outputs": {}, "final_answer": "ok"}
+        with patch.dict(os.environ, env, clear=False):
+            expected = _baseline_run_id(experiment, task, spec, 0, ["coder"])
+            mas_expected = mas_run_id(
+                experiment,
+                task["task_id"],
+                spec["id"],
+                0,
+                removed_agents=[],
+                removal_protocol="none",
+                role_map_items=sorted(identity_role_map(["coder"]).items()),
+                condition_id="baseline",
+            )
+            self.assertEqual(expected, mas_expected)
+            with patch(
+                "mas_contribution_bench.runners.run_single_agent._invoke_roles",
+                return_value=(state, "ok"),
+            ):
+                with patch(
+                    "mas_contribution_bench.runners.run_single_agent.evaluate_task_output",
+                    return_value=evaluation,
+                ):
+                    run, _traces, written_eval = _run_baseline_once(experiment, task, spec, 0)
+            fingerprint = execution_fingerprint(experiment, removal_protocol="none")
+            treatment = execution_treatment(experiment, removal_protocol="none")
+
+        self.assertEqual(run.run_id, expected)
+        self.assertEqual(run.metadata["execution_fingerprint"], fingerprint)
+        self.assertEqual(run.metadata["execution_treatment"], treatment)
+        self.assertEqual(written_eval.metadata["execution_fingerprint"], fingerprint)
+        self.assertEqual(written_eval.metadata["execution_treatment"]["model_backend"], "vllm")
+        self.assertEqual(written_eval.metadata["execution_treatment"]["sandbox_backend"], "subprocess")
+
+        renamed = dict(env)
+        renamed["MODEL_NAME"] = "model-b"
+        with patch.dict(os.environ, renamed, clear=False):
+            renamed_id = _baseline_run_id(experiment, task, spec, 0, ["coder"])
+        self.assertNotEqual(expected, renamed_id)
+
+        other_roles = _baseline_run_id(experiment, task, spec, 0, ["planner"])
+        self.assertNotEqual(expected, other_roles)
+
+        execute_env = dict(env)
+        execute_env["MAS_EXECUTE_CODE"] = "1"
+        with patch.dict(os.environ, execute_env, clear=False):
+            execute_id = _baseline_run_id(experiment, task, spec, 0, ["coder"])
+        self.assertNotEqual(expected, execute_id)
 
 
 class RunMetadataFingerprintTests(unittest.TestCase):

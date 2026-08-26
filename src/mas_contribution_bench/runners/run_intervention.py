@@ -24,44 +24,18 @@ from mas_contribution_bench.runners.common import (
     listed_attribution_methods,
     load_experiment,
     print_progress,
+    require_evaluation_score,
     run_mas_once,
     select_architectures,
     select_tasks,
     validate_attribution_methods,
+    validate_permission_toggles,
 )
 from mas_contribution_bench.utils.io import append_jsonl, iter_jsonl, stable_id
 
 
-FALLBACK_ROLE_PRIORITY = [
-    "coder",
-    "executor",
-    "verifier",
-    "tester",
-    "critic",
-    "reviewer",
-    "debugger",
-    "planner",
-    "researcher",
-    "retriever",
-    "supervisor",
-    "memory_manager",
-    "tool_agent",
-    "finalizer",
-    "aggregator",
-]
-
-
 def _use_checkpointing() -> bool:
     return os.getenv("MAS_DISABLE_CHECKPOINT", "").lower() not in {"1", "true", "yes", "y"}
-
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _mean(values: list[float]) -> float:
@@ -149,12 +123,6 @@ def _graph_feature_row(variant_id: str, variant: dict[str, Any], roles: list[str
         "out_degree": out_degree,
         "fan_in": max(in_degree.values()) if in_degree else 0,
         "fan_out": max(out_degree.values()) if out_degree else 0,
-        "fallback_final_answer_policy": {
-            "enabled": True,
-            "policy": "nearest_upstream_non_null_agent",
-            "tie_breaker": "solution_bearing_role_priority",
-            "role_priority": FALLBACK_ROLE_PRIORITY,
-        },
     }
 
 
@@ -168,16 +136,14 @@ def _clone_architecture(base_architecture: Any, variant: dict[str, Any], roles: 
     raw["family"] = variant.get("template", "controlled")
     raw["entrypoint"] = roles[0] if roles else ""
     raw["terminal_nodes"] = ["final_answer"]
-
-    orchestration = dict(raw.get("orchestration", {}))
-    orchestration["fallback_final_answer"] = {
-        "enabled": True,
-        "policy": "nearest_upstream_non_null_agent",
-        "tie_breaker": "solution_bearing_role_priority",
-        "role_priority": FALLBACK_ROLE_PRIORITY,
-    }
+    orchestration = dict(variant.get("orchestration") or {})
+    orchestration["max_rounds"] = 1
+    template = str(variant.get("template") or "")
+    if template in {"chain", "dag"}:
+        orchestration.setdefault("execution_mode", "dag")
+    elif orchestration.get("execution_mode") in {None, "", "debate"}:
+        orchestration["execution_mode"] = "single_pass"
     raw["orchestration"] = orchestration
-
     return controlled_architecture(raw, architecture_id=variant_id)
 
 
@@ -336,6 +302,11 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
         cached = coalition_cache.get(coalition_id)
         if cached is not None:
             coalition_cache_hits += 1
+            require_evaluation_score(
+                cached,
+                dataset=task.get("dataset") or cached.get("dataset"),
+                task_id=task.get("task_id") or cached.get("task_id"),
+            )
             return cached
 
         print_progress(
@@ -361,11 +332,14 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
             "sampling_seed": int(seed),
             "active_agents": sorted(active_agents),
             "removed_agents": sorted(removed_agents),
-            "score": _as_float(evaluation.score),
+            "score": require_evaluation_score(
+                evaluation,
+                dataset=task.get("dataset"),
+                task_id=task.get("task_id"),
+            ),
             "run_id": run.run_id,
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
-            "final_answer_policy": "nearest_upstream_non_null_agent",
             "execution_fingerprint": fingerprint,
             "execution_treatment": treatment,
         }
@@ -428,7 +402,11 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                     continue
 
                 full_row = evaluate_coalition(task, architecture_id, int(seed), roles, role_set)
-                full_score = _as_float(full_row.get("score"))
+                full_score = require_evaluation_score(
+                    full_row,
+                    dataset=task.get("dataset"),
+                    task_id=task.get("task_id"),
+                )
 
                 if "loo" in methods:
                     for agent in roles:
@@ -447,7 +425,11 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
 
                         active_agents = role_set - {agent}
                         ablated_row = evaluate_coalition(task, architecture_id, int(seed), roles, active_agents)
-                        ablated_score = _as_float(ablated_row.get("score"))
+                        ablated_score = require_evaluation_score(
+                            ablated_row,
+                            dataset=task.get("dataset"),
+                            task_id=task.get("task_id"),
+                        )
                         record = AttributionRecord(
                             attribution_id=attribution_id,
                             experiment_id=experiment.experiment_id,
@@ -473,7 +455,6 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                                 "topology_template": variant.get("template"),
                                 "full_coalition_id": full_row.get("coalition_id"),
                                 "ablated_coalition_id": ablated_row.get("coalition_id"),
-                                "final_answer_policy": "nearest_upstream_non_null_agent",
                                 "execution_fingerprint": fingerprint,
                                 "execution_treatment": treatment,
                             },
@@ -506,15 +487,19 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                         rng.shuffle(permutation)
 
                         active: set[str] = set()
-                        prev_score = _as_float(
-                            evaluate_coalition(task, architecture_id, int(seed), roles, active).get("score")
+                        prev_score = require_evaluation_score(
+                            evaluate_coalition(task, architecture_id, int(seed), roles, active),
+                            dataset=task.get("dataset"),
+                            task_id=task.get("task_id"),
                         )
 
                         for agent in permutation:
                             before = set(active)
                             active.add(agent)
-                            current_score = _as_float(
-                                evaluate_coalition(task, architecture_id, int(seed), roles, active).get("score")
+                            current_score = require_evaluation_score(
+                                evaluate_coalition(task, architecture_id, int(seed), roles, active),
+                                dataset=task.get("dataset"),
+                                task_id=task.get("task_id"),
                             )
                             marginal = current_score - prev_score
                             marginals_by_agent[agent].append(marginal)
@@ -575,7 +560,6 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                                 "topology_template": variant.get("template"),
                                 "marginal_values": values,
                                 "shapley_samples": shapley_samples,
-                                "final_answer_policy": "nearest_upstream_non_null_agent",
                                 "execution_fingerprint": fingerprint,
                                 "execution_treatment": treatment,
                             },
@@ -601,7 +585,6 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
         "variants": [variant_id for variant_id, _, _ in topology_variants],
         "methods": methods,
         "shapley_samples": shapley_samples if "shapley_sampled" in methods else 0,
-        "final_answer_policy": "nearest_upstream_non_null_agent",
         "attribution_file": str(attribution_path),
         "coalition_file": str(coalition_path),
         "run_file": str(run_path),
@@ -902,6 +885,11 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
         cached = coalition_cache.get(coalition_id)
         if cached is not None:
             coalition_cache_hits += 1
+            require_evaluation_score(
+                cached,
+                dataset=task.get("dataset") or cached.get("dataset"),
+                task_id=task.get("task_id") or cached.get("task_id"),
+            )
             return cached
 
         print_progress(
@@ -936,7 +924,11 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
             "removed_agents": sorted(removed_agents),
             "active_functional_roles": sorted({role_map.get(role, role) for role in active_agents}),
             "removed_functional_roles": sorted({role_map.get(role, role) for role in removed_agents}),
-            "score": _as_float(evaluation.score),
+            "score": require_evaluation_score(
+                evaluation,
+                dataset=task.get("dataset"),
+                task_id=task.get("task_id"),
+            ),
             "run_id": run.run_id,
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
@@ -1006,7 +998,11 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                     continue
 
                 full_row = evaluate_coalition(task, architecture_id, int(seed), roles, role_set, condition)
-                full_score = _as_float(full_row.get("score"))
+                full_score = require_evaluation_score(
+                    full_row,
+                    dataset=task.get("dataset"),
+                    task_id=task.get("task_id"),
+                )
 
                 if "loo" in methods:
                     for agent in roles:
@@ -1036,7 +1032,11 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                             active_agents,
                             condition,
                         )
-                        ablated_score = _as_float(ablated_row.get("score"))
+                        ablated_score = require_evaluation_score(
+                            ablated_row,
+                            dataset=task.get("dataset"),
+                            task_id=task.get("task_id"),
+                        )
                         record = AttributionRecord(
                             attribution_id=attribution_id,
                             experiment_id=experiment.experiment_id,
@@ -1108,15 +1108,19 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                         rng.shuffle(permutation)
 
                         active: set[str] = set()
-                        prev_score = _as_float(
-                            evaluate_coalition(task, architecture_id, int(seed), roles, active, condition).get("score")
+                        prev_score = require_evaluation_score(
+                            evaluate_coalition(task, architecture_id, int(seed), roles, active, condition),
+                            dataset=task.get("dataset"),
+                            task_id=task.get("task_id"),
                         )
 
                         for agent in permutation:
                             before = set(active)
                             active.add(agent)
-                            current_score = _as_float(
-                                evaluate_coalition(task, architecture_id, int(seed), roles, active, condition).get("score")
+                            current_score = require_evaluation_score(
+                                evaluate_coalition(task, architecture_id, int(seed), roles, active, condition),
+                                dataset=task.get("dataset"),
+                                task_id=task.get("task_id"),
                             )
                             marginal = current_score - prev_score
                             marginals_by_agent[agent].append(marginal)
@@ -1230,9 +1234,30 @@ def _permission_value_label(value: Any) -> str:
     return str(value).replace(" ", "_")
 
 
+def _permission_toggle_names(intervention: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    toggle = intervention.get("toggle")
+    if toggle not in (None, ""):
+        names.append(str(toggle))
+    names.extend(str(item) for item in intervention.get("toggles", []) or [])
+    return names
+
+
+def _validate_configured_permission_interventions(interventions: list[dict[str, Any]]) -> None:
+    for intervention in interventions:
+        validate_permission_toggles(
+            _permission_toggle_names(intervention),
+            context=f"permission intervention {intervention.get('id')}",
+        )
+
+
 def _permission_level_overrides(intervention: dict[str, Any], level: Any) -> dict[str, bool]:
     toggle = intervention.get("toggle")
     toggles = [str(item) for item in intervention.get("toggles", [])]
+    validate_permission_toggles(
+        _permission_toggle_names(intervention),
+        context=f"permission intervention {intervention.get('id')}",
+    )
 
     if toggle:
         return {str(toggle): bool(level)}
@@ -1377,6 +1402,10 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
     """
 
     experiment = load_experiment(config_path)
+    permission_interventions = list(experiment.raw.get("permission_interventions", []))
+    if not permission_interventions:
+        raise ValueError("exp07 requires permission_interventions.")
+    _validate_configured_permission_interventions(permission_interventions)
     attribution_cfg = experiment.raw.get("attribution", {})
     methods = _intervention_methods(experiment)
     protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
@@ -1389,10 +1418,6 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
     architectures = select_architectures(experiment)
     if not architectures:
         raise ValueError("exp07 requires base_architectures or architectures.include.")
-
-    permission_interventions = list(experiment.raw.get("permission_interventions", []))
-    if not permission_interventions:
-        raise ValueError("exp07 requires permission_interventions.")
 
     missing = [architecture_id for architecture_id in architectures if architecture_id not in experiment.benchmark.architectures]
     if missing:
@@ -1503,6 +1528,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
         cached = coalition_cache.get(coalition_id)
         if cached is not None:
             coalition_cache_hits += 1
+            require_evaluation_score(
+                cached,
+                dataset=task.get("dataset") or cached.get("dataset"),
+                task_id=task.get("task_id") or cached.get("task_id"),
+            )
             return cached
 
         print_progress(
@@ -1538,7 +1568,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
             "permission_overrides": permission_overrides,
             "active_agents": sorted(active_agents),
             "removed_agents": sorted(removed_agents),
-            "score": _as_float(evaluation.score),
+            "score": require_evaluation_score(
+                evaluation,
+                dataset=task.get("dataset"),
+                task_id=task.get("task_id"),
+            ),
             "run_id": run.run_id,
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
@@ -1608,7 +1642,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                     continue
 
                 full_row = evaluate_coalition(task, architecture_id, int(seed), roles, role_set, condition)
-                full_score = _as_float(full_row.get("score"))
+                full_score = require_evaluation_score(
+                    full_row,
+                    dataset=task.get("dataset"),
+                    task_id=task.get("task_id"),
+                )
 
                 if "loo" in methods:
                     for agent in roles:
@@ -1638,7 +1676,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                             active_agents,
                             condition,
                         )
-                        ablated_score = _as_float(ablated_row.get("score"))
+                        ablated_score = require_evaluation_score(
+                            ablated_row,
+                            dataset=task.get("dataset"),
+                            task_id=task.get("task_id"),
+                        )
                         record = AttributionRecord(
                             attribution_id=attribution_id,
                             experiment_id=experiment.experiment_id,
@@ -1715,15 +1757,19 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                         rng.shuffle(permutation)
 
                         active: set[str] = set()
-                        prev_score = _as_float(
-                            evaluate_coalition(task, architecture_id, int(seed), roles, active, condition).get("score")
+                        prev_score = require_evaluation_score(
+                            evaluate_coalition(task, architecture_id, int(seed), roles, active, condition),
+                            dataset=task.get("dataset"),
+                            task_id=task.get("task_id"),
                         )
 
                         for agent in permutation:
                             before = set(active)
                             active.add(agent)
-                            current_score = _as_float(
-                                evaluate_coalition(task, architecture_id, int(seed), roles, active, condition).get("score")
+                            current_score = require_evaluation_score(
+                                evaluate_coalition(task, architecture_id, int(seed), roles, active, condition),
+                                dataset=task.get("dataset"),
+                                task_id=task.get("task_id"),
                             )
                             marginal = current_score - prev_score
                             marginals_by_agent[agent].append(marginal)

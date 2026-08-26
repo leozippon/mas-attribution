@@ -25,6 +25,13 @@ DATASET_TASK_FILES = {
     "multiagentbench": "multiagentbench_tasks.jsonl",
     "marble": "marble_tasks.jsonl",
     "swebench_lite": "swebench_lite_tasks.jsonl",
+    "aime_2026": "aime_2026_tasks.jsonl",
+    "gpqa_diamond": "gpqa_diamond_tasks.jsonl",
+    "hle": "hle_tasks.jsonl",
+    "arc_agi_2": "arc_agi_2_tasks.jsonl",
+    "ifbench": "ifbench_tasks.jsonl",
+    "livecodebench": "livecodebench_tasks.jsonl",
+    "swebench_verified": "swebench_verified_tasks.jsonl",
 }
 
 
@@ -64,7 +71,11 @@ def iter_jsonl(path: str | Path) -> Iterable[tuple[int, dict[str, Any]]]:
             line = line.strip()
             if not line:
                 continue
-            yield line_number, json.loads(line)
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                raise
+            yield line_number, payload
 
 
 def load_jsonl_tasks(
@@ -256,7 +267,7 @@ def summarize_tasks(tasks: list[TaskRecord]) -> dict[str, Any]:
 
     for task in tasks:
         dataset = _dataset_value(task.dataset)
-        task_type = task.task_type.value if hasattr(task.task_type, "value") else str(task.task_type)
+        task_type = str(getattr(task.task_type, "value", task.task_type))
         by_dataset[dataset] = by_dataset.get(dataset, 0) + 1
         by_split[task.split] = by_split.get(task.split, 0) + 1
         by_type[task_type] = by_type.get(task_type, 0) + 1

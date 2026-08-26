@@ -2,41 +2,76 @@
 
 This project separates two stages:
 
-1. MAS generation produces `EvaluationRecord` JSONL files containing `final_answer`.
-2. Official benchmark harnesses consume exported prediction files and produce official scores.
+1. MAS generation produces `EvaluationRecord` JSONL files containing
+   `final_answer`.
+2. Official benchmark harnesses consume exported prediction files and
+   produce official scores.
 
-The separation is necessary because official harnesses such as SWE-bench are batch evaluators that build Docker images, restore repositories, apply patches, and run test suites. They should not be invoked once per MAS run inside `evaluate_task_output`.
+Official harnesses such as SWE-bench are batch evaluators. They should
+not be invoked once per MAS run inside `evaluate_task_output`.
 
-## Currently wired
+## Local in-loop scoring
 
-- HumanEval: local Docker Python unit tests. Real `pass@1` requires `--execute-code`; formal runs should use Docker. The in-loop evaluator refuses unit-test scoring when execution is disabled rather than substituting text equality.
-- MBPP: local Docker Python unit tests, with the same `--execute-code` requirement as HumanEval.
-- AIME/HLE/GPQA: normalized exact-match fallback.
-- IFBench: partial rule-based fallback.
-- SWE-bench Lite / SWE-bench Verified: official prediction export plus `swebench.harness.run_evaluation` launcher.
+These five canonical datasets are scored inside the generation loop:
+
+- AIME 2026: integer exact match
+- GPQA Diamond: normalized exact match, including gold stored under
+  common metadata keys
+- HLE: normalized exact match on text-only rows; preparation excludes
+  media-bearing tasks because the configured Qwen endpoint is text-only
+- ARC-AGI-2: exact grid match on public evaluation tasks against expected
+  test outputs stored off the public prompt; training paths are excluded
+- IFBench: official AllenAI IFBench strict verifier (`ifbench==0.2.0`)
+  over `allenai/IFBench_test`. Prompt-level score is 1 iff every
+  instruction ID passes `instructions_registry.INSTRUCTION_DICT`.
+  Missing package, missing instruction IDs, or unknown IDs fail closed.
+  Empty model output is an empty-output failure without importing the
+  verifier.
+
+## Prediction/export-only in-loop
+
+LiveCodeBench and SWE-bench Verified stay:
+
+```text
+score = None
+passed = None
+```
+
+in `evaluate_task_output`. They are not attribution-eligible until
+official results are joined. Do not treat a later official score as if
+it had been available during LOO, Shapley, or intervention runs.
+
+HumanEval and MBPP unit-test helpers still exist in the codebase but
+are not part of the canonical suite.
 
 ## Export predictions
 
 ```bash
 python scripts/export_official_predictions.py \
-  --score-file data/results/scores/qwen_all_tasksets_full_system_scores.jsonl \
-  --output-dir data/results/official_predictions/qwen_all_exp01 \
+  --score-file data/results/exp01/scores.jsonl \
+  --output-dir data/results/exp01/official_predictions \
   --model-name qwen-local
 ```
+
+The generation endpoint is an externally managed local Qwen server.
+This repository does not launch vLLM.
 
 ## Run SWE-bench official harness
 
 ```bash
 python scripts/run_official_evaluators.py \
-  --prediction-dir data/results/official_predictions/qwen_all_exp01 \
+  --prediction-dir data/results/exp01/official_predictions \
   --dataset swebench_verified \
-  --run-id qwen_all_exp01_swe_verified \
+  --run-id exp01_swe_verified \
   --max-workers 1 \
   --cache-level env
 ```
 
-Use `--dry-run` first to print the exact command without launching Docker builds.
+Use `--dry-run` first to print the command without launching Docker
+builds.
 
-## Not yet official-scored
+## Not yet official-scored in-loop
 
-LiveCodeBench, TeamBench, ARC-AGI-2, tau2-bench, MARBLE, and MultiAgentBench require their benchmark-specific runners/environments. The export script writes prediction scaffolds, but formal scores require integrating those official packages or restoring missing labels/workspaces.
+LiveCodeBench still needs its official package/environment. The export
+script can write prediction scaffolds. Formal scores require that
+external harness, then a join step before any attribution use.

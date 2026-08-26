@@ -1,118 +1,105 @@
 id: exp08_generalization
 stage: 8
-name: Task- and communication-conditioned generalization
+name: Task- and communication-conditioned descriptive summaries
 purpose: >
-  Test whether contribution patterns found in Exp03-Exp07 are stable across task
-  conditions and communication behavior. This experiment is analysis-only and
-  reuses existing scores, attribution records, traces, and task metadata.
+  Describe whether attribution patterns from Exp03-Exp07 look similar
+  across pre-treatment task metadata and communication summaries. This
+  experiment is analysis-only, makes no LLM calls, and does not support
+  causal or inferential claims.
 depends_on:
-- exp01_full_system
-- exp02_single_agent_baseline
-- exp03_loo_attribution
-- exp04_shapley_attribution
-- exp05_topology_intervention
-- exp06_role_intervention
-- exp07_permission_intervention
-research_questions:
-- RQ1
-- RQ2
-- RQ4
-- RQ5
-- RQ6
-- RQ8
-hypotheses:
-- H2
-- H4
-- H5
-- H8
-- H9
-
+  - exp01_full_system
+  - exp02_single_agent_baseline
+  - exp03_loo_attribution
+  - exp04_shapley_attribution
+  - exp05_topology_intervention
+  - exp06_role_intervention
+  - exp07_permission_intervention
 datasets:
-- name: humaneval
-  task_file: data/processed/tasks/humaneval_tasks.jsonl
-  split: test
-  max_tasks: 164
-  task_selection: deterministic_first
-- name: mbpp
-  task_file: data/processed/tasks/mbpp_tasks.jsonl
-  split: test
-  max_tasks: 427
-  task_selection: deterministic_first
-
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
 inputs:
-  task_metadata_file: data/processed/metadata/task_metadata.jsonl
-  score_files:
-  - data/results/scores/full_system_scores.jsonl
-  - data/results/scores/baseline_scores.jsonl
-  - data/results/scores/exp03_loo_attribution_scores.jsonl
-  - data/results/scores/exp04_shapley_attribution_scores.jsonl
-  - data/results/scores/exp05_topology_intervention_scores.jsonl
-  - data/results/scores/exp06_role_intervention_scores.jsonl
-  - data/results/scores/exp06_role_intervention_mbpp_validation_scores.jsonl
-  - data/results/scores/exp07_permission_intervention_scores.jsonl
   attribution_files:
-  - data/results/attribution/loo_attribution.jsonl
-  - data/results/attribution/shapley_banzhaf_attribution.jsonl
-  - data/results/attribution/topology_intervention_attribution.jsonl
-  - data/results/attribution/role_intervention_attribution.jsonl
-  - data/results/attribution/role_intervention_mbpp_validation_attribution.jsonl
-  - data/results/attribution/permission_intervention_attribution.jsonl
+    - data/results/exp03/loo_attribution.jsonl
+    - data/results/exp04/shapley_banzhaf_attribution.jsonl
+    - data/results/exp05/attribution.jsonl
+    - data/results/exp06/attribution.jsonl
+    - data/results/exp07/attribution.jsonl
   coalition_files:
-  - data/results/attribution/coalition_scores.jsonl
-  - data/results/attribution/topology_intervention_coalitions.jsonl
-  - data/results/attribution/role_intervention_coalitions.jsonl
-  - data/results/attribution/role_intervention_mbpp_validation_coalitions.jsonl
-  - data/results/attribution/permission_intervention_coalitions.jsonl
+    - data/results/exp04/coalition_scores.jsonl
+    - data/results/exp05/coalitions.jsonl
+    - data/results/exp06/coalitions.jsonl
+    - data/results/exp07/coalitions.jsonl
   trace_files:
-  - data/traces/loo/exp03_loo_attribution_traces.jsonl
-  - data/traces/shapley/exp04_shapley_attribution_traces.jsonl
-  - data/traces/interventions/topology/exp05_topology_intervention_traces.jsonl
-  - data/traces/interventions/role/exp06_role_intervention_traces.jsonl
-  - data/traces/interventions/role_mbpp_validation/exp06_role_intervention_mbpp_validation_traces.jsonl
-  - data/traces/interventions/permission/exp07_permission_intervention_traces.jsonl
-
+    - data/traces/exp03/exp03_loo_attribution_traces.jsonl
+    - data/traces/exp04/exp04_shapley_attribution_traces.jsonl
+    - data/traces/exp05/exp05_topology_intervention_traces.jsonl
+    - data/traces/exp06/exp06_role_intervention_traces.jsonl
+    - data/traces/exp07/exp07_permission_intervention_traces.jsonl
 analysis:
-  task_metadata_file: data/processed/metadata/task_metadata.jsonl
-  compare_to_core_tasks: true
   analysis_only: true
+  descriptive_only: true
+  no_llm: true
+  causal_claims: false
+  inferential_tests: false
   task_condition_axes:
-  - dataset
-  - difficulty_level
-  - single_agent_success_bin
-  - full_mas_success_bin
-  - dominant_failure_type
-  - prompt_length_bin
-  - task_type
+    - dataset
+    - difficulty_level
+    - prompt_length_bin
+    - task_type
   communication_condition_axes:
-  - trace_length_bin
-  - input_token_bin
-  - output_token_bin
-  - role_count_bin
-  - null_agent_bin
+    - trace_length_bin
+    - input_token_bin
+    - output_token_bin
+    - role_count_bin
+    - null_agent_bin
   contribution_targets:
-  - mean_contribution
-  - role_ranking
-  - negative_contribution_rate
-  - communication_correlation
-  tests:
-  - grouped_rank_stability
-  - contribution_shift_by_task_condition
-  - communication_contribution_correlation
-
+    - mean_contribution
+    - role_ranking
+    - negative_contribution_rate
+    - descriptive_communication_correlation
+  notes: >
+    Task metadata is derived from the configured normalized task files.
+    Score files are not used as covariates. Communication summaries and
+    correlations are descriptive and non-causal.
 outputs:
-  summary_file: data/results/statistics/generalization_summary.jsonl
-  task_slice_file: data/results/statistics/generalization_task_slices.jsonl
-  communication_slice_file: data/results/statistics/generalization_communication_slices.jsonl
-  ranking_file: data/results/statistics/generalization_role_rankings.jsonl
-  correlation_file: data/results/statistics/generalization_communication_correlations.jsonl
-  feature_file: data/results/features/generalization_attribution_features.jsonl
-  statistics_file: data/results/statistics/generalization.jsonl
-
+  summary_file: data/results/exp08/summary.jsonl
+  task_slice_file: data/results/exp08/task_slices.jsonl
+  communication_slice_file: data/results/exp08/communication_slices.jsonl
+  ranking_file: data/results/exp08/role_rankings.jsonl
+  correlation_file: data/results/exp08/communication_correlations.jsonl
+  feature_file: data/results/exp08/attribution_features.jsonl
+  statistics_file: data/results/exp08/statistics.jsonl
 model:
   backend: analysis_only
   name: none
   homogeneous: true
-
 logging:
   save_run_records: false
   save_full_trace: false
@@ -120,8 +107,6 @@ logging:
   save_intermediate_outputs: false
   save_cost: false
   save_failure_type: true
-
 evaluation:
   primary_utility: task
-  code_task_metric: pass_at_1
-  bootstrap_confidence_interval: false
+  notes: Descriptive summaries only. No causal or inferential claim.

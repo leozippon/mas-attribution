@@ -22,6 +22,13 @@ class DatasetName(str, Enum):
     MULTIAGENTBENCH = "multiagentbench"
     MARBLE = "marble"
     SWEBENCH_LITE = "swebench_lite"
+    AIME_2026 = "aime_2026"
+    GPQA_DIAMOND = "gpqa_diamond"
+    HLE = "hle"
+    ARC_AGI_2 = "arc_agi_2"
+    IFBENCH = "ifbench"
+    LIVECODEBENCH = "livecodebench"
+    SWEBENCH_VERIFIED = "swebench_verified"
 
 
 class TaskType(str, Enum):

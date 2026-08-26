@@ -1,7 +1,11 @@
 id: A7_graph
 name: Graph Coordination
 family: graph_coordination
-description: "A richer coordination graph with supervision, retrieval, tool use, memory, implementation, critique, verification, and finalization."
+description: >
+  A richer coordination design graph with supervision, retrieval, tool
+  use, memory, implementation, critique, verification, and finalization.
+  The current graph builder executes each role once in a deterministic
+  single pass; it does not iterate graph-state rounds.
 
 roles:
   - supervisor
@@ -52,10 +56,13 @@ edges:
 
 orchestration:
   execution_mode: graph
-  routing_policy: graph_state_based
+  routing_policy: graph_single_pass
   aggregation_policy: supervisor_final
-  stopping_condition: supervisor_accepts_finalizer_output
-  max_rounds: 3
+  stopping_condition: supervisor_or_finalizer_output
+  max_rounds: 1
+  notes: >
+    Single-pass execution. Cycles and feedback edges describe the design
+    graph only.
 
 default_permissions:
   supervisor: supervisor
@@ -69,13 +76,17 @@ default_permissions:
   finalizer: finalizer
 
 recommended_datasets:
-  - teambench
-  - multiagentbench
-  - marble
-  - swebench_lite
+  - aime_2026
+  - gpqa_diamond
+  - hle
+  - arc_agi_2
+  - ifbench
 
 attribution_notes:
-  removal_protocols: [hard_removal, null_agent_replacement, weak_model_replacement]
+  removal_protocols:
+    - hard_removal
+    - null_agent_replacement
+    - weak_model_replacement
   primary_questions:
     - "Do Myerson-style graph constraints change contribution allocation?"
     - "Do memory and tool access create information or permission bottlenecks?"
