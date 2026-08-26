@@ -84,7 +84,18 @@ def run_full_system(config_path: str | Path, max_tasks: int | None = None) -> di
                 run_id_seed = f"task={task.get('task_id')} arch={architecture_id} seed={seed}"
                 from mas_contribution_bench.utils.io import stable_id
 
-                run_id = stable_id(experiment.experiment_id, task["task_id"], architecture_id, seed, [])
+                architecture = experiment.benchmark.architectures[architecture_id]
+                role_map_items = sorted((role, role) for role in architecture.roles)
+                run_id = stable_id(
+                    experiment.experiment_id,
+                    task["task_id"],
+                    architecture_id,
+                    seed,
+                    [],
+                    "default",
+                    role_map_items,
+                    [],
+                )
                 if run_id in done:
                     print_progress(f"[skip] {completed}/{total} {run_id_seed} run_id={run_id}")
                     continue

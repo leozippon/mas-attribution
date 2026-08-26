@@ -1,8 +1,8 @@
 id: exp07_permission_intervention
 stage: 7
-name: Permission-only intervention
-purpose: Estimate the independent contribution of tool access, write access, routing authority, memory,
-  and final-answer authority.
+name: Runtime-enforced permission intervention
+purpose: Estimate the independent contribution of write access, test/tool access,
+  and final-answer authority under runtime-enforced permission constraints.
 depends_on:
 - exp03_loo_attribution
 - exp06_role_intervention
@@ -27,15 +27,25 @@ base_architectures:
 - A3_dag
 - A5_star
 permission_interventions:
-- id: verifier_tool_access
-  role: verifier
-  toggle: run_tests
-  levels:
-  - false
-  - true
 - id: coder_write_access
   role: coder
   toggle: write_solution
+  levels:
+  - false
+  - true
+- id: verifier_test_access
+  role: verifier
+  toggles:
+  - call_tools
+  - run_tests
+  levels:
+  - false
+  - true
+- id: tester_test_access
+  role: tester
+  toggles:
+  - call_tools
+  - run_tests
   levels:
   - false
   - true
@@ -45,33 +55,11 @@ permission_interventions:
   levels:
   - false
   - true
-- id: supervisor_routing_authority
-  role: supervisor
-  toggle: route_messages
-  levels:
-  - false
-  - true
-- id: researcher_private_information
-  role: researcher
-  toggle: private_information_access
-  levels:
-  - false
-  - true
-- id: memory_manager_memory_rw
-  role: memory_manager
-  toggles:
-  - read_memory
-  - write_memory
-  levels:
-  - none
-  - read_only
-  - read_write
-- id: tool_agent_tool_access
-  role: tool_agent
-  toggle: call_tools
-  levels:
-  - false
-  - true
+permission_enforcement:
+  mode: strict
+  block_unauthorized_artifacts: true
+  require_authorized_final_answer: true
+  record_permission_diagnostics: true
 attribution:
   methods:
   - loo
@@ -82,10 +70,7 @@ analysis:
   effect_targets:
   - tool_access_effect
   - write_access_effect
-  - routing_authority_effect
   - final_authority_effect
-  - information_access_effect
-  - memory_effect
   tests:
   - paired_test
   - mixed_effects_regression

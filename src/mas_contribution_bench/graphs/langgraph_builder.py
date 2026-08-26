@@ -173,24 +173,85 @@ class MASGraphBuilder:
     def _respect_final_answer_permission(self, state: dict[str, Any]) -> bool:
         return bool(state.get("respect_final_answer_permission", False))
 
+    def _record_final_answer_choice(
+        self,
+        state: dict[str, Any],
+        *,
+        source_role: str | None,
+        fallback_used: bool,
+        no_authorized_final_answer: bool = False,
+        unauthorized_candidates: list[str] | None = None,
+    ) -> None:
+        diagnostics = dict(state.get("permission_diagnostics") or {})
+        diagnostics.update(
+            {
+                "final_answer_source_role": source_role,
+                "fallback_used": fallback_used,
+                "no_authorized_final_answer": no_authorized_final_answer,
+                "unauthorized_final_answer_candidates": unauthorized_candidates or [],
+            }
+        )
+        state["permission_diagnostics"] = diagnostics
+
+    def _strict_final_answer_permission(self, state: dict[str, Any]) -> bool:
+        return bool(
+            self._respect_final_answer_permission(state)
+            and state.get("strict_permission_enforcement", False)
+        )
+
     def _default_final_answer(self, state: dict[str, Any], order: list[str]) -> str:
         final_role = self._final_role(order)
         if final_role and final_role in state["agent_outputs"]:
             output = state["agent_outputs"][final_role]
             if not self._respect_final_answer_permission(state) or self._has_final_answer_permission(output):
+                self._record_final_answer_choice(
+                    state,
+                    source_role=final_role,
+                    fallback_used=False,
+                )
                 return str(output.get("content", ""))
 
+        unauthorized_candidates = []
         if self._respect_final_answer_permission(state):
             for role in reversed(order):
                 output = state.get("agent_outputs", {}).get(role)
                 if self._is_null_output(output):
                     continue
                 if self._has_final_answer_permission(output):
+                    self._record_final_answer_choice(
+                        state,
+                        source_role=role,
+                        fallback_used=True,
+                    )
                     return str(output.get("content", ""))
+                unauthorized_candidates.append(role)
+
+        if self._strict_final_answer_permission(state):
+            self._record_final_answer_choice(
+                state,
+                source_role=None,
+                fallback_used=True,
+                no_authorized_final_answer=True,
+                unauthorized_candidates=unauthorized_candidates,
+            )
+            return ""
 
         if state["agent_outputs"]:
+            source_role = next(reversed(state["agent_outputs"]))
+            self._record_final_answer_choice(
+                state,
+                source_role=source_role,
+                fallback_used=True,
+                unauthorized_candidates=unauthorized_candidates,
+            )
             return str(list(state["agent_outputs"].values())[-1].get("content", ""))
 
+        self._record_final_answer_choice(
+            state,
+            source_role=None,
+            fallback_used=False,
+            no_authorized_final_answer=True,
+        )
         return ""
 
     def _fallback_final_answer(self, state: dict[str, Any], order: list[str]) -> str:
@@ -227,28 +288,77 @@ class MASGraphBuilder:
                 else:
                     fallback_candidates.append(role)
                 continue
+            self._record_final_answer_choice(
+                state,
+                source_role=role,
+                fallback_used=False,
+            )
             return str(output.get("content", ""))
 
         if authorized_candidates:
             output = state.get("agent_outputs", {}).get(authorized_candidates[0])
+            self._record_final_answer_choice(
+                state,
+                source_role=authorized_candidates[0],
+                fallback_used=authorized_candidates[0] not in self._terminal_sources(),
+                unauthorized_candidates=fallback_candidates,
+            )
             return str(output.get("content", "")) if output else ""
 
         remaining = list(reversed(order))
+        remaining_unauthorized = []
         if self._respect_final_answer_permission(state):
             for role in remaining:
                 output = state.get("agent_outputs", {}).get(role)
                 if self._is_null_output(output):
                     continue
                 if self._has_final_answer_permission(output):
+                    self._record_final_answer_choice(
+                        state,
+                        source_role=role,
+                        fallback_used=True,
+                        unauthorized_candidates=fallback_candidates,
+                    )
                     return str(output.get("content", ""))
+                remaining_unauthorized.append(role)
+
+        if self._strict_final_answer_permission(state):
+            self._record_final_answer_choice(
+                state,
+                source_role=None,
+                fallback_used=True,
+                no_authorized_final_answer=True,
+                unauthorized_candidates=fallback_candidates + remaining_unauthorized,
+            )
+            return ""
 
         for role in fallback_candidates + remaining:
             output = state.get("agent_outputs", {}).get(role)
             if self._is_null_output(output):
                 continue
+            self._record_final_answer_choice(
+                state,
+                source_role=role,
+                fallback_used=True,
+                unauthorized_candidates=fallback_candidates,
+            )
             return str(output.get("content", ""))
 
+        self._record_final_answer_choice(
+            state,
+            source_role=None,
+            fallback_used=True,
+            no_authorized_final_answer=True,
+            unauthorized_candidates=fallback_candidates,
+        )
         return ""
+
+    def _terminal_sources(self) -> list[str]:
+        return [
+            src
+            for src, dst in getattr(self.architecture, "edges", [])
+            if dst == "final_answer"
+        ]
 
     def _final_role(self, order: list[str]) -> str | None:
         terminal_sources = []

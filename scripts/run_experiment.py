@@ -25,6 +25,7 @@ from mas_contribution_bench.config import load_experiment_spec  # noqa: E402
 from mas_contribution_bench.runners import (  # noqa: E402
     run_attribution,
     run_full_system,
+    run_generalization,
     run_intervention,
     run_single_agent_baseline,
 )
@@ -34,6 +35,9 @@ EXPERIMENT_ALIASES = {
     "exp01_full_system": "configs/experiments/exp01_full_system.yaml",
     "exp02_single_agent_baseline": "configs/experiments/exp02_single_agent_baseline.yaml",
     "exp03_loo_attribution": "configs/experiments/exp03_loo_attribution.yaml",
+    "exp01_qwen_all_tasksets": "configs/experiments/exp01_qwen_all_tasksets.yaml",
+    "exp02_qwen_all_tasksets_single_agent_baseline": "configs/experiments/exp02_qwen_all_tasksets_single_agent_baseline.yaml",
+    "exp03_qwen_all_tasksets_loo_attribution": "configs/experiments/exp03_qwen_all_tasksets_loo_attribution.yaml",
     "exp04_shapley_attribution": "configs/experiments/exp04_shapley_attribution.yaml",
     "exp05_topology_intervention": "configs/experiments/exp05_topology_intervention.yaml",
     "exp06_role_intervention": "configs/experiments/exp06_role_intervention.yaml",
@@ -74,6 +78,8 @@ def infer_runner(experiment_id: str, mode: str | None):
         raise SystemExit(f"Unknown mode: {selected}")
     if "single_agent" in experiment_id:
         return run_single_agent_baseline
+    if "generalization" in experiment_id:
+        return run_generalization
     if "intervention" in experiment_id:
         return run_intervention
     if any(key in experiment_id for key in ["loo", "shapley", "banzhaf", "myerson", "owen"]):
@@ -105,7 +111,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--model-backend",
-        choices=["dry-run", "deepseek"],
+        choices=["dry-run", "deepseek", "vllm", "qwen", "openai", "openai_compatible"],
         default=None,
         help="Model backend. Default is dry-run unless MAS_MODEL_BACKEND is set.",
     )
@@ -123,7 +129,10 @@ def main() -> int:
     if args.model_backend:
         os.environ["MAS_MODEL_BACKEND"] = args.model_backend
     if args.model_name:
+        os.environ["MODEL_NAME"] = args.model_name
         os.environ["DEEPSEEK_MODEL"] = args.model_name
+        os.environ["OPENAI_MODEL"] = args.model_name
+        os.environ["VLLM_MODEL"] = args.model_name
     if args.execute_code:
         os.environ["MAS_EXECUTE_CODE"] = "1"
     if args.sandbox_backend:

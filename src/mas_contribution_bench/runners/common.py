@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from mas_contribution_bench.agents import DeepSeekModelClient, DryRunModelClient, build_agents
+from mas_contribution_bench.agents import DeepSeekModelClient, DryRunModelClient, OpenAICompatibleModelClient, build_agents
 from mas_contribution_bench.config import ExperimentSpec, load_experiment_spec
 from mas_contribution_bench.data.loaders import load_jsonl_tasks
 from mas_contribution_bench.data.schemas import (
@@ -49,13 +49,30 @@ def build_model_client(experiment: ExperimentSpec):
     backend = model_backend(experiment)
     if backend in {"dry-run", "dry_run", "dryrun", "mock"}:
         return DryRunModelClient()
+    model_cfg = experiment.raw.get("model") or {}
     if backend == "deepseek":
-        model_cfg = experiment.raw.get("model") or {}
         return DeepSeekModelClient(
             default_model=os.getenv("DEEPSEEK_MODEL") or model_cfg.get("name") or model_cfg.get("model") or "deepseek-chat",
             timeout_seconds=float(os.getenv("DEEPSEEK_TIMEOUT", model_cfg.get("timeout_seconds", 120))),
             max_retries=int(os.getenv("DEEPSEEK_MAX_RETRIES", model_cfg.get("max_retries", 3))),
             retry_backoff_seconds=float(os.getenv("DEEPSEEK_RETRY_BACKOFF", model_cfg.get("retry_backoff_seconds", 2.0))),
+        )
+    if backend in {"vllm", "qwen", "openai", "openai_compatible", "openai-compatible"}:
+        return OpenAICompatibleModelClient(
+            default_model=(
+                os.getenv("MODEL_NAME")
+                or os.getenv("OPENAI_MODEL")
+                or os.getenv("VLLM_MODEL")
+                or model_cfg.get("name")
+                or model_cfg.get("model")
+                or "qwen-local"
+            ),
+            base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("VLLM_BASE_URL") or model_cfg.get("base_url") or "http://127.0.0.1:8000/v1",
+            api_key=os.getenv("OPENAI_API_KEY") or os.getenv("VLLM_API_KEY") or "dummy",
+            timeout_seconds=float(os.getenv("OPENAI_TIMEOUT") or os.getenv("VLLM_TIMEOUT") or model_cfg.get("timeout_seconds", 120)),
+            max_retries=int(os.getenv("OPENAI_MAX_RETRIES") or os.getenv("VLLM_MAX_RETRIES") or model_cfg.get("max_retries", 3)),
+            retry_backoff_seconds=float(os.getenv("OPENAI_RETRY_BACKOFF") or os.getenv("VLLM_RETRY_BACKOFF") or model_cfg.get("retry_backoff_seconds", 2.0)),
+            provider_name=backend.replace("-", "_"),
         )
     raise ValueError(f"Unsupported MAS_MODEL_BACKEND: {backend}")
 
@@ -65,6 +82,16 @@ def sandbox_backend(experiment: ExperimentSpec) -> str:
         or (experiment.raw.get("evaluation") or {}).get("sandbox_backend")
         or "auto"
     )
+
+
+def permission_enforcement_enabled(experiment: ExperimentSpec, permission_overrides: dict[str, dict[str, bool]] | None) -> bool:
+    if not permission_overrides:
+        return False
+    env_value = os.getenv("MAS_PERMISSION_ENFORCEMENT")
+    if env_value is not None:
+        return env_value.lower() in {"1", "true", "yes", "y", "strict"}
+    cfg = experiment.raw.get("permission_enforcement") or {}
+    return str(cfg.get("mode", "")).lower() == "strict" or bool(cfg.get("enabled", False))
 
 
 def load_experiment(config_path: str | Path, project_root: str | Path = PROJECT_ROOT) -> ExperimentSpec:
@@ -171,11 +198,13 @@ def run_mas_once(
         sorted((role, sorted(values.items())) for role, values in (permission_overrides or {}).items()),
     )
     started = datetime.now(timezone.utc)
+    strict_permission_enforcement = permission_enforcement_enabled(experiment, permission_overrides)
     result = graph.invoke(
         {
             "task": task,
             "messages": [],
             "respect_final_answer_permission": bool(permission_overrides),
+            "strict_permission_enforcement": strict_permission_enforcement,
             "permission_overrides": permission_overrides or {},
         }
     )
@@ -192,6 +221,7 @@ def run_mas_once(
         sandbox_backend=sandbox_backend(experiment),
     )
     ended = datetime.now(timezone.utc)
+    permission_diagnostics = collect_permission_diagnostics(result.state)
     run = RunRecord(
         run_id=run_id,
         experiment_id=experiment.experiment_id,
@@ -216,9 +246,38 @@ def run_mas_once(
             "permission_overrides": permission_overrides or {},
             "role_intervention": any(position != functional for position, functional in role_map.items()),
             "permission_intervention": bool(permission_overrides),
+            "strict_permission_enforcement": strict_permission_enforcement,
+            "permission_diagnostics": permission_diagnostics,
         },
     )
     return run, trace_records, evaluation
+
+
+def collect_permission_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    outputs = state.get("agent_outputs") or {}
+    blocked_outputs: dict[str, list[str]] = {}
+    blocked_tool_calls: dict[str, list[str]] = {}
+    explicit_overrides: dict[str, dict[str, bool]] = {}
+
+    for role, output in outputs.items():
+        metadata = output.get("metadata") or {}
+        diagnostics = metadata.get("permission_diagnostics") or {}
+        if diagnostics.get("blocked_outputs"):
+            blocked_outputs[str(role)] = list(diagnostics.get("blocked_outputs") or [])
+        if diagnostics.get("blocked_tool_calls"):
+            blocked_tool_calls[str(role)] = list(diagnostics.get("blocked_tool_calls") or [])
+        if diagnostics.get("explicit_permission_overrides"):
+            explicit_overrides[str(role)] = dict(diagnostics.get("explicit_permission_overrides") or {})
+
+    graph_diagnostics = dict(state.get("permission_diagnostics") or {})
+    graph_diagnostics.update(
+        {
+            "blocked_outputs_by_role": blocked_outputs,
+            "blocked_tool_calls_by_role": blocked_tool_calls,
+            "explicit_permission_overrides_by_role": explicit_overrides,
+        }
+    )
+    return graph_diagnostics
 
 
 def summarize_agent_cache_usage(state: dict[str, Any]) -> dict[str, Any]:

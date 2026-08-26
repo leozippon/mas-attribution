@@ -1,0 +1,85 @@
+id: exp03_qwen_loo_attribution
+stage: 3
+name: Qwen local vLLM - Leave-one-out contribution attribution
+purpose: Compute low-cost agent contribution for all core architectures and tasks.
+depends_on:
+- exp01_full_system
+research_questions:
+- RQ2
+- RQ4
+- RQ5
+hypotheses:
+- H1
+- H2
+- H5
+- H7
+datasets:
+- name: humaneval
+  task_file: data/processed/tasks/humaneval_tasks.jsonl
+  split: test
+  max_tasks: 100
+  task_selection: deterministic_first
+- name: mbpp
+  task_file: data/processed/tasks/mbpp_tasks.jsonl
+  split: test
+  max_tasks: 200
+  task_selection: deterministic_first
+architectures:
+  include:
+  - A1_pev
+  - A2_chain
+  - A3_dag
+  - A4_metagpt_lite
+  - A5_star
+  - A6_debate
+  - A7_graph
+attribution:
+  method: loo
+  utility: task
+  primary_removal_protocol: null_agent_replacement
+  sensitivity_removal_protocols:
+  - hard_removal
+  - bypass_removal
+  - weak_model_replacement
+  reuse_full_system_runs: true
+seeds:
+- 0
+- 1
+- 2
+outputs:
+  run_dir: data/runs/qwen/loo
+  trace_dir: data/traces/qwen/loo
+  attribution_file: data/results/attribution/qwen_loo_attribution.jsonl
+  ranking_file: data/results/attribution/qwen_loo_rankings.jsonl
+benchmark_specs:
+  architecture_dir: configs/benchmark_specs/architectures
+  agent_dir: configs/benchmark_specs/agents
+  prompt_dir: configs/benchmark_specs/prompts
+  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+model:
+  backend: vllm
+  name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  homogeneous: true
+  temperature: 0.2
+  max_tokens: 3072
+  timeout_seconds: 180
+logging:
+  save_run_records: true
+  save_full_trace: true
+  save_tool_calls: true
+  save_intermediate_outputs: true
+  save_cost: true
+  save_failure_type: true
+  trace_graphs:
+  - design_graph
+  - trace_graph
+  - dependency_graph
+evaluation:
+  primary_utility: task
+  secondary_utilities:
+  - net
+  - process
+  code_task_metric: pass_at_1
+  non_code_task_metric: official_score
+  bootstrap_confidence_interval: true

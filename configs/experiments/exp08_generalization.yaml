@@ -1,10 +1,17 @@
 id: exp08_generalization
 stage: 8
-name: Cross-dataset and complex-task generalization
-purpose: Test whether contribution patterns learned from code tasks generalize to role-collaboration and
-  tool-heavy tasks.
+name: Task- and communication-conditioned generalization
+purpose: >
+  Test whether contribution patterns found in Exp03-Exp07 are stable across task
+  conditions and communication behavior. This experiment is analysis-only and
+  reuses existing scores, attribution records, traces, and task metadata.
 depends_on:
+- exp01_full_system
+- exp02_single_agent_baseline
 - exp03_loo_attribution
+- exp04_shapley_attribution
+- exp05_topology_intervention
+- exp06_role_intervention
 - exp07_permission_intervention
 research_questions:
 - RQ1
@@ -12,94 +19,109 @@ research_questions:
 - RQ4
 - RQ5
 - RQ6
+- RQ8
 hypotheses:
 - H2
 - H4
 - H5
 - H8
 - H9
+
 datasets:
-- name: teambench
-  task_file: data/processed/tasks/teambench_tasks.jsonl
+- name: humaneval
+  task_file: data/processed/tasks/humaneval_tasks.jsonl
   split: test
-  max_tasks: 150
-  task_selection: stratified_by_task_type
-- name: multiagentbench
-  task_file: data/processed/tasks/multiagentbench_tasks.jsonl
+  max_tasks: 164
+  task_selection: deterministic_first
+- name: mbpp
+  task_file: data/processed/tasks/mbpp_tasks.jsonl
   split: test
-  max_tasks: 120
-  task_selection: stratified_by_task_type
-- name: marble
-  task_file: data/processed/tasks/marble_tasks.jsonl
-  split: test
-  max_tasks: 9
-  task_selection: all
-- name: swebench_lite
-  task_file: data/processed/tasks/swebench_lite_tasks.jsonl
-  split: test
-  max_tasks: 50
-  task_selection: stratified_by_difficulty
-architectures:
-  include:
-  - A3_dag
-  - A4_metagpt_lite
-  - A5_star
-  - A6_debate
-  - A7_graph
-  compatibility_policy: skip_incompatible_task_architecture_pairs
-attribution:
-  methods:
-  - loo
-  - banzhaf_sampled
-  - myerson_sampled
-  removal_protocol: null_agent_replacement
-  banzhaf_samples: 128
-  myerson_graph: design_graph
+  max_tasks: 427
+  task_selection: deterministic_first
+
+inputs:
+  task_metadata_file: data/processed/metadata/task_metadata.jsonl
+  score_files:
+  - data/results/scores/full_system_scores.jsonl
+  - data/results/scores/baseline_scores.jsonl
+  - data/results/scores/exp03_loo_attribution_scores.jsonl
+  - data/results/scores/exp04_shapley_attribution_scores.jsonl
+  - data/results/scores/exp05_topology_intervention_scores.jsonl
+  - data/results/scores/exp06_role_intervention_scores.jsonl
+  - data/results/scores/exp06_role_intervention_mbpp_validation_scores.jsonl
+  - data/results/scores/exp07_permission_intervention_scores.jsonl
+  attribution_files:
+  - data/results/attribution/loo_attribution.jsonl
+  - data/results/attribution/shapley_banzhaf_attribution.jsonl
+  - data/results/attribution/topology_intervention_attribution.jsonl
+  - data/results/attribution/role_intervention_attribution.jsonl
+  - data/results/attribution/role_intervention_mbpp_validation_attribution.jsonl
+  - data/results/attribution/permission_intervention_attribution.jsonl
+  coalition_files:
+  - data/results/attribution/coalition_scores.jsonl
+  - data/results/attribution/topology_intervention_coalitions.jsonl
+  - data/results/attribution/role_intervention_coalitions.jsonl
+  - data/results/attribution/role_intervention_mbpp_validation_coalitions.jsonl
+  - data/results/attribution/permission_intervention_coalitions.jsonl
+  trace_files:
+  - data/traces/loo/exp03_loo_attribution_traces.jsonl
+  - data/traces/shapley/exp04_shapley_attribution_traces.jsonl
+  - data/traces/interventions/topology/exp05_topology_intervention_traces.jsonl
+  - data/traces/interventions/role/exp06_role_intervention_traces.jsonl
+  - data/traces/interventions/role_mbpp_validation/exp06_role_intervention_mbpp_validation_traces.jsonl
+  - data/traces/interventions/permission/exp07_permission_intervention_traces.jsonl
+
 analysis:
+  task_metadata_file: data/processed/metadata/task_metadata.jsonl
   compare_to_core_tasks: true
-  generalization_axes:
+  analysis_only: true
+  task_condition_axes:
   - dataset
+  - difficulty_level
+  - single_agent_success_bin
+  - full_mas_success_bin
+  - dominant_failure_type
+  - prompt_length_bin
   - task_type
-  - difficulty
-  - tool_requirement
+  communication_condition_axes:
+  - trace_length_bin
+  - input_token_bin
+  - output_token_bin
+  - role_count_bin
+  - null_agent_bin
+  contribution_targets:
+  - mean_contribution
+  - role_ranking
+  - negative_contribution_rate
+  - communication_correlation
   tests:
-  - mixed_effects_regression
-  - rank_stability
-seeds:
-- 0
-- 1
-- 2
+  - grouped_rank_stability
+  - contribution_shift_by_task_condition
+  - communication_contribution_correlation
+
 outputs:
-  run_dir: data/runs/generalization
-  trace_dir: data/traces/generalization
-  attribution_file: data/results/attribution/generalization_attribution.jsonl
+  summary_file: data/results/statistics/generalization_summary.jsonl
+  task_slice_file: data/results/statistics/generalization_task_slices.jsonl
+  communication_slice_file: data/results/statistics/generalization_communication_slices.jsonl
+  ranking_file: data/results/statistics/generalization_role_rankings.jsonl
+  correlation_file: data/results/statistics/generalization_communication_correlations.jsonl
+  feature_file: data/results/features/generalization_attribution_features.jsonl
   statistics_file: data/results/statistics/generalization.jsonl
-benchmark_specs:
-  architecture_dir: configs/benchmark_specs/architectures
-  agent_dir: configs/benchmark_specs/agents
-  prompt_dir: configs/benchmark_specs/prompts
-  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+
 model:
-  name: ${MODEL_NAME}
+  backend: analysis_only
+  name: none
   homogeneous: true
-  temperature: 0.2
-  max_tokens: 2048
+
 logging:
-  save_run_records: true
-  save_full_trace: true
-  save_tool_calls: true
-  save_intermediate_outputs: true
-  save_cost: true
+  save_run_records: false
+  save_full_trace: false
+  save_tool_calls: false
+  save_intermediate_outputs: false
+  save_cost: false
   save_failure_type: true
-  trace_graphs:
-  - design_graph
-  - trace_graph
-  - dependency_graph
+
 evaluation:
   primary_utility: task
-  secondary_utilities:
-  - net
-  - process
   code_task_metric: pass_at_1
-  non_code_task_metric: official_score
-  bootstrap_confidence_interval: true
+  bootstrap_confidence_interval: false

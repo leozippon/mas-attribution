@@ -2,20 +2,131 @@
 
 from __future__ import annotations
 
+import json
+import re
+import string
 from typing import Any
 
 from mas_contribution_bench.data.schemas import EvaluationRecord, FailureType
 from mas_contribution_bench.evaluation.humaneval_eval import evaluate_humaneval
 from mas_contribution_bench.evaluation.mbpp_eval import evaluate_mbpp
+from mas_contribution_bench.evaluation.official_task_eval import evaluate_official_answer_task
 from mas_contribution_bench.evaluation.sandbox import SandboxResult
+
+
+def _extract_artifact_or_answer(text: str | None) -> str:
+    if not text:
+        return ""
+    stripped = text.strip()
+    if "```" in stripped:
+        parts = stripped.split("```")
+        for part in parts[1::2]:
+            candidate = part.strip()
+            if candidate.startswith("json"):
+                candidate = candidate[len("json") :].strip()
+            if candidate.startswith("python"):
+                candidate = candidate[len("python") :].strip()
+            extracted = _extract_artifact_or_answer(candidate)
+            if extracted:
+                return extracted
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            payload = json.loads(stripped)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("answer", "final_answer", "artifact", "solution", "prediction", "choice"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return stripped
+
+
+def _normalize_answer(text: str | None) -> str:
+    value = _extract_artifact_or_answer(text).lower().strip()
+    value = value.replace("\u2212", "-").replace("−", "-")
+    value = re.sub(r"\s+", " ", value)
+    value = value.strip(string.whitespace + string.punctuation)
+    return value
+
+
+def _extract_integer_answer(text: str | None) -> str:
+    value = _extract_artifact_or_answer(text)
+    matches = re.findall(r"(?<![\d.])-?\d+(?![\d.])", value)
+    return matches[-1] if matches else _normalize_answer(value)
 
 
 def score_text_answer(final_answer: str | None, reference: str | None = None) -> tuple[float, bool, FailureType]:
     if not final_answer or not final_answer.strip():
         return 0.0, False, FailureType.EMPTY_OUTPUT
-    if reference and final_answer.strip() == reference.strip():
+    if reference and _normalize_answer(final_answer) == _normalize_answer(reference):
         return 1.0, True, FailureType.NONE
     return 0.0, False, FailureType.UNKNOWN
+
+
+def score_multiple_choice_or_exact(task: dict[str, Any], prediction: str | None) -> tuple[float, bool, FailureType, dict[str, Any]]:
+    dataset = str(task.get("dataset", "")).lower()
+    metadata = task.get("metadata") or {}
+    reference = task.get("reference_solution")
+    if dataset == "gpqa_diamond" and not reference:
+        reference = metadata.get("Correct Answer") or metadata.get("Pre-Revision Correct Answer")
+    if dataset == "aime_2026" and reference:
+        predicted = _extract_integer_answer(prediction)
+        passed = predicted == str(reference).strip()
+        return (1.0 if passed else 0.0), passed, (FailureType.NONE if passed else FailureType.UNKNOWN), {
+            "evaluator": "normalized_integer_exact_match",
+            "predicted": predicted,
+            "reference": str(reference),
+        }
+    if reference:
+        score, passed, failure_type = score_text_answer(prediction, str(reference))
+        return score, passed, failure_type, {
+            "evaluator": "normalized_exact_match",
+            "reference": str(reference),
+        }
+    return 0.0, False, FailureType.UNKNOWN, {"evaluator": "text_fallback", "reason": "missing_reference"}
+
+
+def score_ifbench(task: dict[str, Any], prediction: str | None) -> tuple[float, bool, FailureType, dict[str, Any]]:
+    answer = _extract_artifact_or_answer(prediction)
+    if not answer.strip():
+        return 0.0, False, FailureType.EMPTY_OUTPUT, {"evaluator": "ifbench_rule_subset"}
+    metadata = task.get("metadata") or {}
+    instruction_ids = list(metadata.get("instruction_id_list") or [])
+    kwargs_list = list(metadata.get("kwargs") or [])
+    checks: list[bool] = []
+    details: list[dict[str, Any]] = []
+    for idx, instruction_id in enumerate(instruction_ids):
+        params = kwargs_list[idx] if idx < len(kwargs_list) and isinstance(kwargs_list[idx], dict) else {}
+        passed = True
+        if instruction_id == "punctuation:no_comma":
+            passed = "," not in answer and "，" not in answer
+        elif instruction_id == "detectable_format:number_highlighted_sections":
+            required = int(params.get("num_highlights", 0) or 0)
+            passed = len(re.findall(r"\*[^*]+\*", answer)) >= required
+        elif instruction_id == "length_constraints:number_words":
+            required = int(params.get("num_words", 0) or 0)
+            relation = str(params.get("relation", "at least")).lower()
+            count = len(re.findall(r"\b\w+\b", answer))
+            if "at least" in relation:
+                passed = count >= required
+            elif "at most" in relation:
+                passed = count <= required
+            else:
+                passed = count == required
+            details.append({"instruction_id": instruction_id, "word_count": count, "required": required, "relation": relation, "passed": passed})
+            checks.append(passed)
+            continue
+        else:
+            details.append({"instruction_id": instruction_id, "passed": None, "reason": "unsupported_rule"})
+            continue
+        details.append({"instruction_id": instruction_id, "passed": passed})
+        checks.append(passed)
+    if not checks:
+        return 0.0, False, FailureType.UNKNOWN, {"evaluator": "ifbench_rule_subset", "reason": "no_supported_rules", "details": details}
+    score = sum(1 for item in checks if item) / len(checks)
+    passed = score == 1.0
+    return score, passed, (FailureType.NONE if passed else FailureType.TEST_FAILURE), {"evaluator": "ifbench_rule_subset", "details": details}
 
 
 def failure_type_from_sandbox(result: SandboxResult) -> FailureType:
@@ -57,8 +168,10 @@ def evaluate_code_prediction(
                 sandbox_backend=sandbox_backend,
             )
         else:
-            score, passed, failure_type = score_text_answer(prediction, task.get("reference_solution"))
-            return score, passed, failure_type, {"evaluator": "text_fallback"}
+            official_result = evaluate_official_answer_task(task, prediction)
+            if official_result is not None:
+                return official_result
+            return score_multiple_choice_or_exact(task, prediction)
     except ValueError as exc:
         return 0.0, False, FailureType.INVALID_FORMAT, {"error": str(exc)}
     except Exception as exc:

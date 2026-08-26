@@ -1291,6 +1291,11 @@ def _permission_coalition_key(
     )
 
 
+def _run_permission_diagnostics(run: Any) -> dict[str, Any]:
+    metadata = getattr(run, "metadata", None) or {}
+    return dict(metadata.get("permission_diagnostics") or {})
+
+
 def run_permission_intervention(config_path: str | Path, max_tasks: int | None = None) -> dict[str, Any]:
     """Run permission-only interventions.
 
@@ -1466,6 +1471,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
             "run_id": run.run_id,
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
+            "permission_diagnostics": _run_permission_diagnostics(run),
         }
         coalition_cache[coalition_id] = row
 
@@ -1589,6 +1595,8 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                                 "attributed_role_is_target": agent == condition["target_role"],
                                 "full_coalition_id": full_row.get("coalition_id"),
                                 "ablated_coalition_id": ablated_row.get("coalition_id"),
+                                "full_permission_diagnostics": full_row.get("permission_diagnostics", {}),
+                                "ablated_permission_diagnostics": ablated_row.get("permission_diagnostics", {}),
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -1707,6 +1715,8 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                                 "attributed_role_is_target": agent == condition["target_role"],
                                 "marginal_values": values,
                                 "shapley_samples": shapley_samples,
+                                "full_coalition_id": full_row.get("coalition_id"),
+                                "full_permission_diagnostics": full_row.get("permission_diagnostics", {}),
                             },
                         )
                         append_jsonl(attribution_path, [record])

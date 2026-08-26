@@ -1,0 +1,52 @@
+{
+  "livecodebench": {
+    "status": "skipped_download",
+    "records": 701,
+    "raw_dir": "/home/zhangqy/mas_contribution/data/raw/livecodebench",
+    "processed_file": "/home/zhangqy/mas_contribution/data/processed/tasks/livecodebench_tasks.jsonl",
+    "result": {
+      "status": "skipped_download",
+      "reason": "--skip-download"
+    }
+  },
+  "swebench_verified": {
+    "status": "skipped_download",
+    "records": 500,
+    "raw_dir": "/home/zhangqy/mas_contribution/data/raw/swebench_verified",
+    "processed_file": "/home/zhangqy/mas_contribution/data/processed/tasks/swebench_verified_tasks.jsonl",
+    "result": {
+      "status": "skipped_download",
+      "reason": "--skip-download"
+    }
+  },
+  "ifbench": {
+    "status": "skipped_download",
+    "records": 541,
+    "raw_dir": "/home/zhangqy/mas_contribution/data/raw/ifbench",
+    "processed_file": "/home/zhangqy/mas_contribution/data/processed/tasks/ifbench_tasks.jsonl",
+    "result": {
+      "status": "skipped_download",
+      "reason": "--skip-download"
+    }
+  },
+  "tau2_bench": {
+    "status": "skipped_download",
+    "records": 6409,
+    "raw_dir": "/home/zhangqy/mas_contribution/data/raw/tau2_bench",
+    "processed_file": "/home/zhangqy/mas_contribution/data/processed/tasks/tau2_bench_tasks.jsonl",
+    "result": {
+      "status": "skipped_download",
+      "reason": "--skip-download"
+    }
+  },
+  "arc_agi_2": {
+    "status": "skipped_download",
+    "records": 1120,
+    "raw_dir": "/home/zhangqy/mas_contribution/data/raw/arc_agi_2",
+    "processed_file": "/home/zhangqy/mas_contribution/data/processed/tasks/arc_agi_2_tasks.jsonl",
+    "result": {
+      "status": "skipped_download",
+      "reason": "--skip-download"
+    }
+  }
+}

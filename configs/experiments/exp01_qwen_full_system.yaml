@@ -1,0 +1,80 @@
+id: exp01_qwen_full_system
+stage: 1
+name: Qwen local vLLM - Full MAS architecture performance and cost
+purpose: Estimate the complete-system utility, cost, and trace features for each architecture before attribution.
+research_questions:
+- RQ1
+- RQ4
+- RQ6
+hypotheses:
+- H1
+- H2
+- H5
+datasets:
+- name: humaneval
+  task_file: data/processed/tasks/humaneval_tasks.jsonl
+  split: test
+  max_tasks: 100
+  task_selection: deterministic_first
+- name: mbpp
+  task_file: data/processed/tasks/mbpp_tasks.jsonl
+  split: test
+  max_tasks: 200
+  task_selection: deterministic_first
+architectures:
+  include:
+  - A1_pev
+  - A2_chain
+  - A3_dag
+  - A4_metagpt_lite
+  - A5_star
+  - A6_debate
+  - A7_graph
+  compatibility_policy: skip_incompatible_task_architecture_pairs
+seeds:
+- 0
+- 1
+- 2
+sampling:
+  unit: task
+  fixed_order: true
+  stratify_by:
+  - dataset
+  - difficulty
+outputs:
+  run_dir: data/runs/qwen/full_system
+  trace_dir: data/traces/qwen/full_system
+  score_file: data/results/scores/qwen_full_system_scores.jsonl
+  feature_file: data/results/features/qwen_full_system_trace_features.jsonl
+benchmark_specs:
+  architecture_dir: configs/benchmark_specs/architectures
+  agent_dir: configs/benchmark_specs/agents
+  prompt_dir: configs/benchmark_specs/prompts
+  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+model:
+  backend: vllm
+  name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  homogeneous: true
+  temperature: 0.2
+  max_tokens: 3072
+  timeout_seconds: 180
+logging:
+  save_run_records: true
+  save_full_trace: true
+  save_tool_calls: true
+  save_intermediate_outputs: true
+  save_cost: true
+  save_failure_type: true
+  trace_graphs:
+  - design_graph
+  - trace_graph
+  - dependency_graph
+evaluation:
+  primary_utility: task
+  secondary_utilities:
+  - net
+  - process
+  code_task_metric: pass_at_1
+  non_code_task_metric: official_score
+  bootstrap_confidence_interval: true

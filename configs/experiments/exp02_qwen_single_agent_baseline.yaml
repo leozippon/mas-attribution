@@ -1,0 +1,86 @@
+id: exp02_qwen_single_agent_baseline
+stage: 2
+name: Qwen local vLLM - Single-agent, solo-role, and random-team baselines
+purpose: Test whether MAS improves over non-collaborative baselines and estimate task difficulty.
+research_questions:
+- RQ1
+- RQ3
+hypotheses:
+- H5
+datasets:
+- name: humaneval
+  task_file: data/processed/tasks/humaneval_tasks.jsonl
+  split: test
+  max_tasks: 100
+  task_selection: deterministic_first
+- name: mbpp
+  task_file: data/processed/tasks/mbpp_tasks.jsonl
+  split: test
+  max_tasks: 200
+  task_selection: deterministic_first
+baselines:
+- id: single_agent_coder
+  type: single_agent
+  agent: coder
+  prompt_file: configs/benchmark_specs/prompts/coder.md
+- id: single_agent_generalist
+  type: single_agent
+  agent: finalizer
+  prompt_file: configs/benchmark_specs/prompts/finalizer.md
+- id: solo_role
+  type: solo_role
+  roles:
+  - planner
+  - coder
+  - debugger
+  - verifier
+  - critic
+  - researcher
+  - supervisor
+  - finalizer
+- id: random_team
+  type: random_team
+  team_size: 5
+  num_samples_per_task: 3
+seeds:
+- 0
+- 1
+- 2
+outputs:
+  run_dir: data/runs/qwen/single_agent
+  trace_dir: data/traces/qwen/baselines
+  score_file: data/results/scores/qwen_baseline_scores.jsonl
+  single_agent_metadata_file: data/processed/metadata/qwen_single_agent_baseline.jsonl
+  difficulty_file: data/processed/metadata/qwen_task_difficulty.jsonl
+benchmark_specs:
+  architecture_dir: configs/benchmark_specs/architectures
+  agent_dir: configs/benchmark_specs/agents
+  prompt_dir: configs/benchmark_specs/prompts
+  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+model:
+  backend: vllm
+  name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  homogeneous: true
+  temperature: 0.2
+  max_tokens: 3072
+  timeout_seconds: 180
+logging:
+  save_run_records: true
+  save_full_trace: true
+  save_tool_calls: true
+  save_intermediate_outputs: true
+  save_cost: true
+  save_failure_type: true
+  trace_graphs:
+  - design_graph
+  - trace_graph
+  - dependency_graph
+evaluation:
+  primary_utility: task
+  secondary_utilities:
+  - net
+  - process
+  code_task_metric: pass_at_1
+  non_code_task_metric: official_score
+  bootstrap_confidence_interval: true
