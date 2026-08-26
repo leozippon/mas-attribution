@@ -7,7 +7,7 @@ import re
 import string
 from typing import Any
 
-from mas_contribution_bench.data.schemas import EvaluationRecord, FailureType
+from mas_contribution_bench.data.schemas import EvaluationRecord, EvaluatorType, FailureType
 from mas_contribution_bench.evaluation.humaneval_eval import evaluate_humaneval
 from mas_contribution_bench.evaluation.mbpp_eval import evaluate_mbpp
 from mas_contribution_bench.evaluation.official_task_eval import evaluate_official_answer_task
@@ -193,6 +193,20 @@ def evaluate_code_prediction(
     )
 
 
+def _evaluation_field(task: dict[str, Any], name: str) -> Any:
+    evaluation = task.get("evaluation") or {}
+    if isinstance(evaluation, dict):
+        return evaluation.get(name)
+    return getattr(evaluation, name, None)
+
+
+def _evaluator_type_name(task: dict[str, Any]) -> str:
+    raw = _evaluation_field(task, "evaluator_type")
+    if raw is None:
+        return ""
+    return str(getattr(raw, "value", raw)).strip().lower()
+
+
 def evaluate_task_output(
     run_id: str,
     task: dict[str, Any],
@@ -202,6 +216,14 @@ def evaluate_task_output(
     execute_code: bool = False,
     sandbox_backend: str = "auto",
 ) -> EvaluationRecord:
+    evaluator_type = _evaluator_type_name(task)
+    if evaluator_type == EvaluatorType.UNIT_TEST.value and not execute_code:
+        raise ValueError(
+            "Refusing to emit EvaluationRecord: evaluator_type='unit_test' requires code "
+            f"execution (metric={_evaluation_field(task, 'metric')!r}). Enable --execute-code; "
+            "formal runs should use Docker. Text equality is not pass@1 and will not be used "
+            "as a silent fallback."
+        )
     if execute_code:
         score, passed, failure_type, raw_output = evaluate_code_prediction(
             task,

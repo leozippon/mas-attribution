@@ -41,7 +41,8 @@ attribution:
   - hard_removal
   - bypass_removal
   - weak_model_replacement
-  reuse_full_system_runs: true
+  # External full-system donor reuse is disabled.
+  reuse_full_system_runs: false
 seeds:
 - 0
 - 1

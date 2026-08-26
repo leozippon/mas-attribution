@@ -142,6 +142,8 @@ started_at
 status
 ```
 
+`config_hash` is a deterministic hash of the executable bundle: the experiment YAML plus loaded permission sets, agent specs including prompt text, and architecture specs. Runtime treatment (resolved model backend/name, code execution, sandbox backend, and removal protocol) is stored as an execution fingerprint and is part of run, coalition-cache, and attribution IDs. Existing checkpoints from YAML-only hashes are therefore invalid.
+
 The `coalition` and `removal` fields are essential for LOO, Shapley, Banzhaf, Myerson, and Owen attribution.
 
 Removal protocols:
@@ -271,6 +273,8 @@ banzhaf_sampled
 myerson
 owen
 ```
+
+Schema method names include exact/Myerson/Owen estimators, but experiment runners reject those methods because they are not wired.
 
 Supported utility types:
 

@@ -64,7 +64,29 @@ def resolve_config(args: argparse.Namespace) -> Path:
     return path
 
 
+UNIMPLEMENTED_EXPERIMENTS = {
+    "exp09_contribution_predictor": (
+        "exp09_contribution_predictor is a planned design and has no runner. "
+        "Refusing to dispatch it in auto or forced mode; it must not fall through "
+        "to run_full_system or reuse data/runs/full_system."
+    ),
+}
+
+
+def refuse_unimplemented_experiment(experiment_id: str) -> None:
+    experiment_id = str(experiment_id)
+    message = UNIMPLEMENTED_EXPERIMENTS.get(experiment_id)
+    if message is None and "contribution_predictor" in experiment_id:
+        message = (
+            f"{experiment_id} is a planned contribution-predictor design and has no runner. "
+            "Refusing to dispatch it in auto or forced mode."
+        )
+    if message:
+        raise SystemExit(message)
+
+
 def infer_runner(experiment_id: str, mode: str | None):
+    refuse_unimplemented_experiment(experiment_id)
     selected = mode or "auto"
     if selected == "full":
         return run_full_system

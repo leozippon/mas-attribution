@@ -129,6 +129,63 @@ def _load_architecture(path: Path) -> LoadedArchitectureSpec:
     )
 
 
+def _agent_executable_payload(spec: LoadedAgentSpec) -> dict[str, Any]:
+    raw = {key: value for key, value in spec.raw.items() if key != "prompt_file"}
+    return {
+        "role": spec.role,
+        "canonical_role": spec.canonical_role,
+        "description": spec.description,
+        "model": spec.model,
+        "temperature": spec.temperature,
+        "max_tokens": spec.max_tokens,
+        "permissions": spec.permissions,
+        "prompt": spec.prompt,
+        "raw": raw,
+    }
+
+
+def _architecture_executable_payload(spec: LoadedArchitectureSpec) -> dict[str, Any]:
+    return {
+        "architecture_id": spec.architecture_id,
+        "name": spec.name,
+        "family": spec.family,
+        "roles": list(spec.roles),
+        "canonical_roles": dict(spec.canonical_roles),
+        "entrypoint": spec.entrypoint,
+        "terminal_nodes": list(spec.terminal_nodes),
+        "edges": [list(edge) for edge in spec.edges],
+        "orchestration": dict(spec.orchestration),
+        "default_permissions": dict(spec.default_permissions),
+        "raw": spec.raw,
+    }
+
+
+def executable_config_bundle(raw: dict[str, Any], benchmark: BenchmarkSpec) -> dict[str, Any]:
+    """Deterministic payload for the executable experiment specification.
+
+    Paths are omitted when the loaded contents are already included. All loaded
+    permission sets, agent specs (including prompt text), and architecture specs
+    are hashed so a prompt or spec edit cannot reuse another treatment's IDs.
+    """
+
+    return {
+        "experiment": raw,
+        "permissions": benchmark.permissions,
+        "agents": {
+            name: _agent_executable_payload(spec)
+            for name, spec in sorted(benchmark.agents.items())
+        },
+        "architectures": {
+            name: _architecture_executable_payload(spec)
+            for name, spec in sorted(benchmark.architectures.items())
+        },
+    }
+
+
+def compute_config_hash(raw: dict[str, Any], benchmark: BenchmarkSpec) -> str:
+    return stable_hash(executable_config_bundle(raw, benchmark))
+
+
 def load_benchmark_spec(project_root: str | Path = DEFAULT_PROJECT_ROOT) -> BenchmarkSpec:
     project_root = Path(project_root)
     specs_root = project_root / "configs" / "benchmark_specs"
@@ -167,5 +224,5 @@ def load_experiment_spec(path: str | Path, project_root: str | Path = DEFAULT_PR
         experiment_id=raw["id"],
         raw=raw,
         benchmark=benchmark,
-        config_hash=stable_hash(raw),
+        config_hash=compute_config_hash(raw, benchmark),
     )

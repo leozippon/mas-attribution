@@ -16,13 +16,20 @@ from mas_contribution_bench.data.schemas import (
     RemovalProtocol,
 )
 from mas_contribution_bench.runners.common import (
+    WIRED_ATTRIBUTION_METHODS,
     backup_existing_file,
     completed_run_ids,
+    execution_fingerprint,
+    execution_treatment,
+    identity_role_map,
+    listed_attribution_methods,
     load_experiment,
+    mas_run_id,
     print_progress,
     run_mas_once,
     select_architectures,
     select_tasks,
+    validate_attribution_methods,
 )
 from mas_contribution_bench.utils.io import append_jsonl, iter_jsonl, stable_id
 
@@ -54,26 +61,23 @@ def _standard_error(values: list[float]) -> float | None:
     return math.sqrt(variance) / math.sqrt(len(values))
 
 
-def _full_system_score_index(project_root: Path) -> dict[tuple[str, str, int], dict[str, Any]]:
-    """Index corrected exp01 full-system scores by task, architecture, and seed."""
-    runs_by_id: dict[str, dict[str, Any]] = {}
-    for row in iter_jsonl(project_root / "data/runs/full_system/runs.jsonl"):
-        if row.get("experiment_id") == "exp01_full_system":
-            runs_by_id[str(row.get("run_id"))] = row
+def _reuse_full_system_runs_requested(experiment: Any) -> bool:
+    value = (experiment.raw.get("attribution") or {}).get("reuse_full_system_runs")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
 
-    index: dict[tuple[str, str, int], dict[str, Any]] = {}
-    for score in iter_jsonl(project_root / "data/results/scores/full_system_scores.jsonl"):
-        run = runs_by_id.get(str(score.get("run_id")))
-        if not run:
-            continue
-        key = (str(score.get("task_id")), str(score.get("architecture_id")), int(run.get("seed", 0)))
-        index[key] = {
-            "score": _as_float(score.get("score")),
-            "run_id": score.get("run_id"),
-            "passed": score.get("passed"),
-            "failure_type": score.get("failure_type"),
-        }
-    return index
+
+def _reject_full_system_reuse(experiment: Any) -> None:
+    if not _reuse_full_system_runs_requested(experiment):
+        return
+    raise ValueError(
+        "attribution.reuse_full_system_runs=true is rejected: "
+        "treatment-aware donor reuse is not implemented. "
+        "This experiment must compute its own grand coalition under the current "
+        "executable specification and runtime treatment. "
+        "Set attribution.reuse_full_system_runs to false."
+    )
 
 
 def _completed_attribution_ids(path: Path) -> set[str]:
@@ -86,6 +90,7 @@ def _coalition_key(
     architecture_id: str,
     seed: int,
     active_agents: set[str] | list[str] | tuple[str, ...],
+    fingerprint: str,
 ) -> str:
     return stable_id(
         experiment_id,
@@ -94,7 +99,31 @@ def _coalition_key(
         seed,
         "coalition",
         sorted(active_agents),
+        fingerprint,
     )
+
+
+def _loo_attribution_id(
+    experiment_id: str,
+    task_id: str,
+    architecture_id: str,
+    seed: int,
+    agent: str,
+    fingerprint: str,
+) -> str:
+    return stable_id(experiment_id, task_id, architecture_id, seed, agent, "loo", fingerprint)
+
+
+def _sampled_attribution_id(
+    experiment_id: str,
+    task_id: str,
+    architecture_id: str,
+    seed: int,
+    method: str,
+    agent: str,
+    fingerprint: str,
+) -> str:
+    return stable_id(experiment_id, task_id, architecture_id, seed, method, agent, fingerprint)
 
 
 def _load_coalition_cache(path: Path) -> dict[str, dict[str, Any]]:
@@ -115,7 +144,7 @@ def _cfg_int(cfg: dict[str, Any], *paths: str, default: int) -> int:
                 ok = False
                 break
             current = current[part]
-        if ok and current is not None:
+        if ok and isinstance(current, (int, float, str)):
             try:
                 return int(current)
             except (TypeError, ValueError):
@@ -123,25 +152,59 @@ def _cfg_int(cfg: dict[str, Any], *paths: str, default: int) -> int:
     return default
 
 
-def _normalize_method(method: str) -> str:
-    if method == "sampled_shapley":
-        return "shapley_sampled"
-    if method == "sampled_banzhaf":
-        return "banzhaf_sampled"
-    return method
+def _removal_protocol(attribution_cfg: dict[str, Any]) -> str:
+    return str(
+        attribution_cfg.get("primary_removal_protocol")
+        or attribution_cfg.get("removal_protocol")
+        or "null_agent_replacement"
+    )
+
+
+def _resolve_attribution_methods(experiment: Any) -> list[str]:
+    attribution_cfg = experiment.raw.get("attribution") or {}
+    methods = listed_attribution_methods(attribution_cfg)
+    if not methods:
+        experiment_id = str(experiment.experiment_id)
+        if "loo" in experiment_id:
+            methods = ["loo"]
+        elif any(key in experiment_id for key in ("shapley", "banzhaf")):
+            raise ValueError(
+                f"{experiment_id} must list attribution.methods as shapley_sampled and/or "
+                "banzhaf_sampled. Silent fallback to LOO is disabled. "
+                "Myerson, Owen, and exact Shapley/Banzhaf estimators remain unwired and are rejected."
+            )
+        else:
+            raise ValueError(
+                f"{experiment_id} does not specify an attribution method. "
+                f"Supported methods: {', '.join(sorted(WIRED_ATTRIBUTION_METHODS))}. "
+                "Myerson, Owen, and exact Shapley/Banzhaf estimators remain unwired and are rejected."
+            )
+    return validate_attribution_methods(
+        methods,
+        WIRED_ATTRIBUTION_METHODS,
+        context=f"attribution runner ({experiment.experiment_id})",
+    )
 
 
 def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -> dict[str, Any]:
     experiment = load_experiment(config_path)
+    _reject_full_system_reuse(experiment)
+    methods = listed_attribution_methods(experiment.raw.get("attribution") or {})
+    if methods:
+        validate_attribution_methods(
+            methods,
+            {"loo"},
+            context=f"LOO attribution ({experiment.experiment_id})",
+        )
     tasks = select_tasks(experiment)
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
     architectures = select_architectures(experiment)
     seeds = [int(seed) for seed in experiment.raw.get("seeds", [0])]
     attribution_cfg = experiment.raw.get("attribution", {})
-    protocol = attribution_cfg.get("primary_removal_protocol") or attribution_cfg.get(
-        "removal_protocol", "null_agent_replacement"
-    )
+    protocol = _removal_protocol(attribution_cfg)
+    fingerprint = execution_fingerprint(experiment, removal_protocol=protocol)
+    treatment = execution_treatment(experiment, removal_protocol=protocol)
     outputs = experiment.raw.get("outputs", {})
 
     root = experiment.benchmark.project_root
@@ -158,7 +221,6 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
                 print_progress(f"[backup] {file_path} -> {backup}")
             file_path.unlink(missing_ok=True)
 
-    full_scores = _full_system_score_index(root)
     done_runs = completed_run_ids(run_path) if _use_checkpointing() else set()
     done_attr = _completed_attribution_ids(attribution_path) if _use_checkpointing() else set()
 
@@ -178,28 +240,78 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
     for task_index, task in enumerate(tasks, start=1):
         for architecture_id, roles in architecture_roles:
             architecture = experiment.benchmark.architectures[architecture_id]
+            role_map_items = sorted(identity_role_map(architecture.roles).items())
             for seed in seeds:
-                full_key = (str(task["task_id"]), architecture_id, int(seed))
-                full_info = full_scores.get(full_key)
-                if full_info is None:
-                    print_progress(f"[missing_full] task={task['task_id']} arch={architecture_id} seed={seed}; running full once")
-                    full_run, _, full_eval = run_mas_once(experiment, task, architecture_id, int(seed))
-                    full_info = {"score": _as_float(full_eval.score), "run_id": full_run.run_id}
-                full_score = _as_float(full_info.get("score"))
+                pending = [
+                    agent
+                    for agent in roles
+                    if _loo_attribution_id(
+                        experiment.experiment_id,
+                        task["task_id"],
+                        architecture_id,
+                        seed,
+                        agent,
+                        fingerprint,
+                    )
+                    not in done_attr
+                ]
+                if not pending:
+                    print_progress(
+                        f"[skip-group] task={task['task_id']} arch={architecture_id} seed={seed} "
+                        f"completed_attributions={len(roles)}"
+                    )
+                    continue
+
+                print_progress(
+                    f"[full] task={task['task_id']} arch={architecture_id} seed={seed}; "
+                    "running current experiment grand coalition"
+                )
+                full_run, full_traces, full_eval = run_mas_once(
+                    experiment,
+                    task,
+                    architecture_id,
+                    int(seed),
+                    removed_agents=set(),
+                    removal_protocol=protocol,
+                )
+                append_jsonl(run_path, [full_run])
+                append_jsonl(trace_path, full_traces)
+                append_jsonl(evaluation_path, [full_eval])
+                done_runs.add(full_run.run_id)
+                written_runs += 1
+                written_traces += len(full_traces)
+                written_evaluations += 1
+                full_score = _as_float(full_eval.score)
+                full_info = {
+                    "score": full_score,
+                    "run_id": full_run.run_id,
+                    "passed": getattr(full_eval, "passed", None),
+                    "failure_type": getattr(full_eval, "failure_type", None),
+                    "source": "current_experiment_grand_coalition",
+                }
 
                 for agent in roles:
-                    attribution_id = stable_id(experiment.experiment_id, task["task_id"], architecture_id, seed, agent, "loo")
+                    attribution_id = _loo_attribution_id(
+                        experiment.experiment_id,
+                        task["task_id"],
+                        architecture_id,
+                        seed,
+                        agent,
+                        fingerprint,
+                    )
                     label = f"task={task['task_id']} arch={architecture_id} seed={seed} remove={agent}"
                     if attribution_id in done_attr:
                         print_progress(f"[skip] {completed}/{total} {label} attribution_id={attribution_id}")
                         continue
 
-                    ablated_run_id = stable_id(
-                        experiment.experiment_id,
+                    ablated_run_id = mas_run_id(
+                        experiment,
                         task["task_id"],
                         architecture_id,
                         seed,
-                        sorted([agent]),
+                        removed_agents=[agent],
+                        removal_protocol=protocol,
+                        role_map_items=role_map_items,
                     )
                     print_progress(f"[run] {completed + 1}/{total} task_index={task_index}/{len(tasks)} {label}")
                     if ablated_run_id in done_runs:
@@ -239,6 +351,9 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
                             "ablated_run_id": ablated_run.run_id,
                             "full_passed": full_info.get("passed"),
                             "full_failure_type": full_info.get("failure_type"),
+                            "full_source": "current_experiment_grand_coalition",
+                            "execution_fingerprint": fingerprint,
+                            "execution_treatment": treatment,
                         },
                     )
 
@@ -271,6 +386,7 @@ def run_loo_attribution(config_path: str | Path, max_tasks: int | None = None) -
         "trace_file": str(trace_path),
         "evaluation_file": str(evaluation_path),
         "checkpointing": _use_checkpointing(),
+        "execution_fingerprint": fingerprint,
     }
     print_progress(f"[complete] {summary}")
     return summary
@@ -284,6 +400,13 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
     """
 
     experiment = load_experiment(config_path)
+    _reject_full_system_reuse(experiment)
+    methods = listed_attribution_methods(experiment.raw.get("attribution") or {})
+    methods = validate_attribution_methods(
+        methods,
+        {"shapley_sampled", "banzhaf_sampled"},
+        context=f"coalition attribution ({experiment.experiment_id})",
+    )
     tasks = select_tasks(experiment)
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
@@ -291,19 +414,9 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
     architectures = select_architectures(experiment)
     seeds = [int(seed) for seed in experiment.raw.get("seeds", [0])]
     attribution_cfg = experiment.raw.get("attribution", {})
-    methods = [_normalize_method(str(m)) for m in attribution_cfg.get("methods", [])]
-    if not methods:
-        method = attribution_cfg.get("method", "shapley_sampled")
-        methods = [_normalize_method(str(method))]
-
-    methods = [m for m in methods if m in {"shapley_sampled", "banzhaf_sampled"}]
-    if not methods:
-        methods = ["shapley_sampled"]
-
-    protocol = attribution_cfg.get("primary_removal_protocol") or attribution_cfg.get(
-        "removal_protocol", "null_agent_replacement"
-    )
-    protocol = str(protocol or "null_agent_replacement")
+    protocol = _removal_protocol(attribution_cfg)
+    fingerprint = execution_fingerprint(experiment, removal_protocol=protocol)
+    treatment = execution_treatment(experiment, removal_protocol=protocol)
 
     shapley_samples = _cfg_int(
         attribution_cfg,
@@ -346,7 +459,6 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
                 print_progress(f"[backup] {file_path} -> {backup}")
             file_path.unlink(missing_ok=True)
 
-    full_scores = _full_system_score_index(root)
     done_attr = _completed_attribution_ids(attribution_path) if _use_checkpointing() else set()
     coalition_cache = _load_coalition_cache(coalition_path) if _use_checkpointing() else {}
 
@@ -384,33 +496,12 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
             architecture_id,
             seed,
             active_agents,
+            fingerprint,
         )
 
         cached = coalition_cache.get(coalition_id)
         if cached is not None:
             return cached
-
-        full_key = (str(task["task_id"]), architecture_id, int(seed))
-        if len(active_agents) == len(roles) and full_key in full_scores:
-            full_info = full_scores[full_key]
-            row = {
-                "coalition_id": coalition_id,
-                "experiment_id": experiment.experiment_id,
-                "task_id": task["task_id"],
-                "dataset": task["dataset"],
-                "architecture_id": architecture_id,
-                "sampling_seed": int(seed),
-                "active_agents": sorted(active_agents),
-                "removed_agents": sorted(removed_agents),
-                "score": _as_float(full_info.get("score")),
-                "run_id": full_info.get("run_id"),
-                "passed": full_info.get("passed"),
-                "failure_type": full_info.get("failure_type"),
-                "source": "exp01_full_system_cache",
-            }
-            coalition_cache[coalition_id] = row
-            append_jsonl(coalition_path, [row])
-            return row
 
         print_progress(
             f"[coalition] task={task['task_id']} arch={architecture_id} seed={seed} "
@@ -438,7 +529,9 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
             "run_id": run.run_id,
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
-            "source": "coalition_run",
+            "source": "current_experiment_grand_coalition" if not removed_agents else "coalition_run",
+            "execution_fingerprint": fingerprint,
+            "execution_treatment": treatment,
         }
         coalition_cache[coalition_id] = row
 
@@ -530,13 +623,14 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
 
                     for agent in roles:
                         sample_count = len(marginals_by_agent.get(agent, []))
-                        attribution_id = stable_id(
+                        attribution_id = _sampled_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
                             seed,
                             method,
                             agent,
+                            fingerprint,
                         )
                         label = (
                             f"method={method} task={task['task_id']} arch={architecture_id} "
@@ -582,6 +676,8 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
                                 "coalition_cache_size": len(coalition_cache),
                                 "shapley_samples": shapley_samples if method == "shapley_sampled" else None,
                                 "banzhaf_samples": banzhaf_samples if method == "banzhaf_sampled" else None,
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
 
@@ -611,6 +707,7 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
         "methods": methods,
         "shapley_samples": shapley_samples,
         "banzhaf_samples": banzhaf_samples,
+        "execution_fingerprint": fingerprint,
     }
     print_progress(f"[complete] {summary}")
     return summary
@@ -618,23 +715,15 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
 
 def run_attribution(config_path: str | Path, max_tasks: int | None = None) -> dict[str, Any]:
     experiment = load_experiment(config_path)
-    attribution_cfg = experiment.raw.get("attribution", {})
-    method = _normalize_method(str(attribution_cfg.get("method", "")))
-    methods = [_normalize_method(str(m)) for m in attribution_cfg.get("methods", [])]
-
-    if (
-        experiment.experiment_id == "exp03_loo_attribution"
-        or method == "loo"
-        or "loo" in methods
-    ):
+    _reject_full_system_reuse(experiment)
+    methods = _resolve_attribution_methods(experiment)
+    loo_methods = [method for method in methods if method == "loo"]
+    sampled_methods = [method for method in methods if method in {"shapley_sampled", "banzhaf_sampled"}]
+    if loo_methods and sampled_methods:
+        raise ValueError(
+            "Cannot mix loo with shapley_sampled/banzhaf_sampled in one attribution run. "
+            "Use separate experiment configs."
+        )
+    if loo_methods:
         return run_loo_attribution(config_path, max_tasks=max_tasks)
-
-    if (
-        method in {"shapley_sampled", "banzhaf_sampled"}
-        or any(m in {"shapley_sampled", "banzhaf_sampled"} for m in methods)
-        or "shapley" in experiment.experiment_id
-        or "banzhaf" in experiment.experiment_id
-    ):
-        return run_coalition_attribution(config_path, max_tasks=max_tasks)
-
-    return run_loo_attribution(config_path, max_tasks=max_tasks)
+    return run_coalition_attribution(config_path, max_tasks=max_tasks)

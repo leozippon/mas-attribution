@@ -4,6 +4,11 @@ Exp08 is analysis-only by design. It reuses existing task metadata, scores,
 attribution records, and traces produced by Exp01-Exp07, then asks whether
 agent contribution patterns change with task conditions and communication
 behavior. No LLM calls are made here.
+
+The configured task metadata file and every path listed in inputs.score_files,
+attribution_files, coalition_files, and trace_files must exist and be non-empty.
+The run also fails if no metadata rows are selected or no attribution rows load
+for those tasks.
 """
 
 from __future__ import annotations
@@ -26,13 +31,59 @@ def _as_path(root: Path, value: str | Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
-def _existing_paths(root: Path, values: Iterable[str | Path]) -> list[Path]:
-    paths = []
-    for value in values:
-        path = _as_path(root, value)
-        if path.exists() and path.stat().st_size > 0:
-            paths.append(path)
-    return paths
+def _display_path(root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+REQUIRED_INPUT_FILE_KEYS = (
+    "score_files",
+    "attribution_files",
+    "coalition_files",
+    "trace_files",
+)
+
+
+def _resolve_paths(root: Path, values: Iterable[str | Path]) -> list[Path]:
+    return [_as_path(root, value) for value in values]
+
+
+def _task_metadata_path(root: Path, raw: dict[str, Any]) -> Path:
+    analysis_cfg = raw.get("analysis") or {}
+    input_cfg = raw.get("inputs") or {}
+    metadata_file = (
+        analysis_cfg.get("task_metadata_file")
+        or input_cfg.get("task_metadata_file")
+        or "data/processed/metadata/task_metadata.jsonl"
+    )
+    return _as_path(root, metadata_file)
+
+
+def _listed_input_paths(root: Path, raw: dict[str, Any]) -> list[tuple[str, Path]]:
+    input_cfg = raw.get("inputs") or {}
+    listed = [("task_metadata_file", _task_metadata_path(root, raw))]
+    for key in REQUIRED_INPUT_FILE_KEYS:
+        for value in input_cfg.get(key) or []:
+            listed.append((key, _as_path(root, value)))
+    return listed
+
+
+def _preflight_required_inputs(root: Path, raw: dict[str, Any]) -> None:
+    problems: list[str] = []
+    for label, path in _listed_input_paths(root, raw):
+        if not path.is_file():
+            problems.append(f"{label} missing: {path}")
+        elif path.stat().st_size == 0:
+            problems.append(f"{label} empty: {path}")
+    if problems:
+        raise FileNotFoundError(
+            "exp08 generalization requires the configured task metadata file and every "
+            "path listed in inputs.score_files, attribution_files, coalition_files, and "
+            "trace_files to exist and be non-empty. "
+            + "; ".join(problems)
+        )
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -112,9 +163,7 @@ def _select_task_metadata(
     max_tasks: int | None,
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
     root = experiment.benchmark.project_root
-    analysis_cfg = experiment.raw.get("analysis") or {}
-    metadata_file = analysis_cfg.get("task_metadata_file", "data/processed/metadata/task_metadata.jsonl")
-    metadata_path = _as_path(root, metadata_file)
+    metadata_path = _task_metadata_path(root, experiment.raw)
     dataset_limits = _configured_datasets(experiment, max_tasks)
     dataset_splits = {
         str(dataset.get("name")): dataset.get("split")
@@ -162,8 +211,8 @@ def _load_score_context(
         }
     )
 
-    for path in _existing_paths(root, score_files):
-        source_file = str(path.relative_to(root))
+    for path in _resolve_paths(root, score_files):
+        source_file = _display_path(root, path)
         for row in iter_jsonl(path):
             task_id = str(row.get("task_id"))
             if task_id not in selected_tasks:
@@ -229,7 +278,7 @@ def _load_trace_stats(
             "roles": set(),
         }
     )
-    for path in _existing_paths(root, trace_files):
+    for path in _resolve_paths(root, trace_files):
         for row in iter_jsonl(path):
             task_id = str(row.get("task_id"))
             if task_id not in selected_tasks:
@@ -274,7 +323,7 @@ def _load_coalition_run_map(
     """Map coalition identifiers to run ids for intervention attribution joins."""
 
     mapping: dict[str, str] = {}
-    for path in _existing_paths(root, coalition_files):
+    for path in _resolve_paths(root, coalition_files):
         for row in iter_jsonl(path):
             task_id = str(row.get("task_id"))
             if task_id not in selected_tasks:
@@ -296,8 +345,8 @@ def _load_attribution_rows(
     coalition_run_map: dict[str, str],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for path in _existing_paths(root, attribution_files):
-        source_file = str(path.relative_to(root))
+    for path in _resolve_paths(root, attribution_files):
+        source_file = _display_path(root, path)
         for row in iter_jsonl(path):
             task_id = str(row.get("task_id"))
             if task_id not in selected_tasks:
@@ -478,7 +527,14 @@ def run_generalization(config_path: str | Path, max_tasks: int | None = None) ->
     analysis_cfg = experiment.raw.get("analysis") or {}
     outputs = experiment.raw.get("outputs") or {}
 
+    _preflight_required_inputs(root, experiment.raw)
+
     metadata_by_task, selected_tasks = _select_task_metadata(experiment, max_tasks)
+    if not metadata_by_task:
+        raise ValueError(
+            "exp08 generalization selected 0 task metadata rows. "
+            "Check datasets/splits against the configured task metadata file."
+        )
     input_cfg = experiment.raw.get("inputs") or {}
     attribution_files = list(input_cfg.get("attribution_files") or [])
     coalition_files = list(input_cfg.get("coalition_files") or [])
@@ -497,6 +553,11 @@ def run_generalization(config_path: str | Path, max_tasks: int | None = None) ->
         trace_stats,
         coalition_run_map,
     )
+    if not attribution_rows:
+        raise ValueError(
+            "exp08 generalization loaded 0 attribution rows for the selected tasks. "
+            "Complete upstream attribution experiments before running exp08."
+        )
 
     task_axes = list(
         analysis_cfg.get("task_condition_axes")

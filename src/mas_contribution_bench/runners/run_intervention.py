@@ -17,12 +17,17 @@ from mas_contribution_bench.data.schemas import (
 )
 from mas_contribution_bench.graphs.architectures import controlled_architecture
 from mas_contribution_bench.runners.common import (
+    WIRED_INTERVENTION_METHODS,
     backup_existing_file,
+    execution_fingerprint,
+    execution_treatment,
+    listed_attribution_methods,
     load_experiment,
     print_progress,
     run_mas_once,
     select_architectures,
     select_tasks,
+    validate_attribution_methods,
 )
 from mas_contribution_bench.utils.io import append_jsonl, iter_jsonl, stable_id
 
@@ -93,7 +98,7 @@ def _cfg_int(cfg: dict[str, Any], *paths: str, default: int) -> int:
                 ok = False
                 break
             current = current[part]
-        if ok and current is not None:
+        if ok and isinstance(current, (int, float, str)):
             try:
                 return int(current)
             except (TypeError, ValueError):
@@ -101,12 +106,12 @@ def _cfg_int(cfg: dict[str, Any], *paths: str, default: int) -> int:
     return default
 
 
-def _normalize_method(method: str) -> str:
-    if method == "sampled_shapley":
-        return "shapley_sampled"
-    if method == "sampled_banzhaf":
-        return "banzhaf_sampled"
-    return method
+def _intervention_methods(experiment: Any) -> list[str]:
+    return validate_attribution_methods(
+        listed_attribution_methods(experiment.raw.get("attribution") or {}, default=["loo"]),
+        WIRED_INTERVENTION_METHODS,
+        context=f"intervention runner ({experiment.experiment_id})",
+    )
 
 
 def _variant_edges(variant: dict[str, Any]) -> list[tuple[str, str]]:
@@ -206,25 +211,44 @@ def _coalition_key(
     architecture_id: str,
     seed: int,
     active_agents: set[str] | list[str] | tuple[str, ...],
+    fingerprint: str,
 ) -> str:
-    return stable_id(experiment_id, task_id, architecture_id, seed, "coalition", sorted(active_agents))
+    return stable_id(
+        experiment_id,
+        task_id,
+        architecture_id,
+        seed,
+        "coalition",
+        sorted(active_agents),
+        fingerprint,
+    )
+
+
+def _topology_attribution_id(
+    experiment_id: str,
+    task_id: str,
+    architecture_id: str,
+    seed: int,
+    method: str,
+    agent: str,
+    fingerprint: str,
+) -> str:
+    return stable_id(experiment_id, task_id, architecture_id, seed, method, agent, fingerprint)
 
 
 def run_topology_intervention(config_path: str | Path, max_tasks: int | None = None) -> dict[str, Any]:
     experiment = load_experiment(config_path)
+    attribution_cfg = experiment.raw.get("attribution", {})
+    methods = _intervention_methods(experiment)
+    protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
+    fingerprint = execution_fingerprint(experiment, removal_protocol=protocol)
+    treatment = execution_treatment(experiment, removal_protocol=protocol)
     tasks = select_tasks(experiment)
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
 
     topology_variants = _inject_topology_variants(experiment)
     seeds = [int(seed) for seed in experiment.raw.get("seeds", [0])]
-    attribution_cfg = experiment.raw.get("attribution", {})
-    methods = [_normalize_method(str(m)) for m in attribution_cfg.get("methods", ["loo"])]
-    methods = [m for m in methods if m in {"loo", "shapley_sampled"}]
-    if not methods:
-        methods = ["loo"]
-
-    protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
     shapley_samples = _cfg_int(
         attribution_cfg,
         "shapley.num_permutations",
@@ -306,6 +330,7 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
             architecture_id,
             seed,
             active_agents,
+            fingerprint,
         )
 
         cached = coalition_cache.get(coalition_id)
@@ -341,6 +366,8 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
             "final_answer_policy": "nearest_upstream_non_null_agent",
+            "execution_fingerprint": fingerprint,
+            "execution_treatment": treatment,
         }
         coalition_cache[coalition_id] = row
 
@@ -363,26 +390,28 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                 pending_loo = [
                     agent
                     for agent in roles
-                    if stable_id(
+                    if _topology_attribution_id(
                         experiment.experiment_id,
                         task["task_id"],
                         architecture_id,
                         seed,
                         "loo",
                         agent,
+                        fingerprint,
                     )
                     not in done_attr
                 ]
                 pending_shapley = [
                     agent
                     for agent in roles
-                    if stable_id(
+                    if _topology_attribution_id(
                         experiment.experiment_id,
                         task["task_id"],
                         architecture_id,
                         seed,
                         "shapley_sampled",
                         agent,
+                        fingerprint,
                     )
                     not in done_attr
                 ]
@@ -403,13 +432,14 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
 
                 if "loo" in methods:
                     for agent in roles:
-                        attribution_id = stable_id(
+                        attribution_id = _topology_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
                             seed,
                             "loo",
                             agent,
+                            fingerprint,
                         )
                         if attribution_id in done_attr:
                             print_progress(f"[skip] {completed}/{total} method=loo topology={architecture_id} agent={agent}")
@@ -444,6 +474,8 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                                 "full_coalition_id": full_row.get("coalition_id"),
                                 "ablated_coalition_id": ablated_row.get("coalition_id"),
                                 "final_answer_policy": "nearest_upstream_non_null_agent",
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -496,13 +528,14 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                         )
 
                     for agent in roles:
-                        attribution_id = stable_id(
+                        attribution_id = _topology_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
                             seed,
                             "shapley_sampled",
                             agent,
+                            fingerprint,
                         )
                         if attribution_id in done_attr:
                             print_progress(
@@ -543,6 +576,8 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
                                 "marginal_values": values,
                                 "shapley_samples": shapley_samples,
                                 "final_answer_policy": "nearest_upstream_non_null_agent",
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -574,6 +609,7 @@ def run_topology_intervention(config_path: str | Path, max_tasks: int | None = N
         "evaluation_file": str(evaluation_path),
         "statistics_file": str(statistics_path),
         "checkpointing": _use_checkpointing(),
+        "execution_fingerprint": fingerprint,
     }
     print_progress(f"[complete] {summary}")
     return summary
@@ -590,6 +626,7 @@ def _role_coalition_key(
     seed: int,
     active_agents: set[str] | list[str] | tuple[str, ...],
     agent_role_map: dict[str, str],
+    fingerprint: str,
 ) -> str:
     return stable_id(
         experiment_id,
@@ -599,6 +636,29 @@ def _role_coalition_key(
         "role_coalition",
         sorted(active_agents),
         _role_map_key(agent_role_map),
+        fingerprint,
+    )
+
+
+def _condition_attribution_id(
+    experiment_id: str,
+    task_id: str,
+    architecture_id: str,
+    seed: int,
+    condition_id: str,
+    method: str,
+    agent: str,
+    fingerprint: str,
+) -> str:
+    return stable_id(
+        experiment_id,
+        task_id,
+        architecture_id,
+        seed,
+        condition_id,
+        method,
+        agent,
+        fingerprint,
     )
 
 
@@ -720,6 +780,11 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
     """
 
     experiment = load_experiment(config_path)
+    attribution_cfg = experiment.raw.get("attribution", {})
+    methods = _intervention_methods(experiment)
+    protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
+    fingerprint = execution_fingerprint(experiment, removal_protocol=protocol)
+    treatment = execution_treatment(experiment, removal_protocol=protocol)
     tasks = select_tasks(experiment)
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
@@ -737,13 +802,6 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
         raise ValueError(f"Unknown architectures in exp06 base_architectures: {missing}")
 
     seeds = [int(seed) for seed in experiment.raw.get("seeds", [0])]
-    attribution_cfg = experiment.raw.get("attribution", {})
-    methods = [_normalize_method(str(m)) for m in attribution_cfg.get("methods", ["loo"])]
-    methods = [m for m in methods if m in {"loo", "shapley_sampled"}]
-    if not methods:
-        methods = ["loo"]
-
-    protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
     shapley_samples = _cfg_int(
         attribution_cfg,
         "shapley.num_permutations",
@@ -838,6 +896,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
             seed,
             active_agents,
             role_map,
+            fingerprint,
         )
 
         cached = coalition_cache.get(coalition_id)
@@ -881,6 +940,8 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
             "run_id": run.run_id,
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
+            "execution_fingerprint": fingerprint,
+            "execution_treatment": treatment,
         }
         coalition_cache[coalition_id] = row
 
@@ -904,7 +965,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                 pending_loo = [
                     agent
                     for agent in roles
-                    if stable_id(
+                    if _condition_attribution_id(
                         experiment.experiment_id,
                         task["task_id"],
                         architecture_id,
@@ -912,13 +973,14 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                         condition["condition_id"],
                         "loo",
                         agent,
+                        fingerprint,
                     )
                     not in done_attr
                 ]
                 pending_shapley = [
                     agent
                     for agent in roles
-                    if stable_id(
+                    if _condition_attribution_id(
                         experiment.experiment_id,
                         task["task_id"],
                         architecture_id,
@@ -926,6 +988,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                         condition["condition_id"],
                         "shapley_sampled",
                         agent,
+                        fingerprint,
                     )
                     not in done_attr
                 ]
@@ -947,7 +1010,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
 
                 if "loo" in methods:
                     for agent in roles:
-                        attribution_id = stable_id(
+                        attribution_id = _condition_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
@@ -955,6 +1018,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                             condition["condition_id"],
                             "loo",
                             agent,
+                            fingerprint,
                         )
                         if attribution_id in done_attr:
                             print_progress(
@@ -1003,6 +1067,8 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                                 "agent_role_map": role_map,
                                 "full_coalition_id": full_row.get("coalition_id"),
                                 "ablated_coalition_id": ablated_row.get("coalition_id"),
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -1064,7 +1130,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                         )
 
                     for agent in roles:
-                        attribution_id = stable_id(
+                        attribution_id = _condition_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
@@ -1072,6 +1138,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                             condition["condition_id"],
                             "shapley_sampled",
                             agent,
+                            fingerprint,
                         )
                         if attribution_id in done_attr:
                             print_progress(
@@ -1117,6 +1184,8 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
                                 "agent_role_map": role_map,
                                 "marginal_values": values,
                                 "shapley_samples": shapley_samples,
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -1149,6 +1218,7 @@ def run_role_intervention(config_path: str | Path, max_tasks: int | None = None)
         "evaluation_file": str(evaluation_path),
         "statistics_file": str(statistics_path),
         "checkpointing": _use_checkpointing(),
+        "execution_fingerprint": fingerprint,
     }
     print_progress(f"[complete] {summary}")
     return summary
@@ -1278,6 +1348,7 @@ def _permission_coalition_key(
     active_agents: set[str] | list[str] | tuple[str, ...],
     condition_id: str,
     permission_overrides: dict[str, dict[str, bool]],
+    fingerprint: str,
 ) -> str:
     return stable_id(
         experiment_id,
@@ -1288,6 +1359,7 @@ def _permission_coalition_key(
         condition_id,
         sorted(active_agents),
         _permission_map_key(permission_overrides),
+        fingerprint,
     )
 
 
@@ -1305,6 +1377,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
     """
 
     experiment = load_experiment(config_path)
+    attribution_cfg = experiment.raw.get("attribution", {})
+    methods = _intervention_methods(experiment)
+    protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
+    fingerprint = execution_fingerprint(experiment, removal_protocol=protocol)
+    treatment = execution_treatment(experiment, removal_protocol=protocol)
     tasks = select_tasks(experiment)
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
@@ -1322,13 +1399,6 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
         raise ValueError(f"Unknown architectures in exp07 base_architectures: {missing}")
 
     seeds = [int(seed) for seed in experiment.raw.get("seeds", [0])]
-    attribution_cfg = experiment.raw.get("attribution", {})
-    methods = [_normalize_method(str(m)) for m in attribution_cfg.get("methods", ["loo"])]
-    methods = [m for m in methods if m in {"loo", "shapley_sampled"}]
-    if not methods:
-        methods = ["loo"]
-
-    protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
     shapley_samples = _cfg_int(
         attribution_cfg,
         "shapley.num_permutations",
@@ -1427,6 +1497,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
             active_agents,
             str(condition["condition_id"]),
             permission_overrides,
+            fingerprint,
         )
 
         cached = coalition_cache.get(coalition_id)
@@ -1472,6 +1543,8 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
             "passed": getattr(evaluation, "passed", None),
             "failure_type": getattr(evaluation, "failure_type", None),
             "permission_diagnostics": _run_permission_diagnostics(run),
+            "execution_fingerprint": fingerprint,
+            "execution_treatment": treatment,
         }
         coalition_cache[coalition_id] = row
 
@@ -1494,7 +1567,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                 pending_loo = [
                     agent
                     for agent in roles
-                    if stable_id(
+                    if _condition_attribution_id(
                         experiment.experiment_id,
                         task["task_id"],
                         architecture_id,
@@ -1502,13 +1575,14 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                         condition["condition_id"],
                         "loo",
                         agent,
+                        fingerprint,
                     )
                     not in done_attr
                 ]
                 pending_shapley = [
                     agent
                     for agent in roles
-                    if stable_id(
+                    if _condition_attribution_id(
                         experiment.experiment_id,
                         task["task_id"],
                         architecture_id,
@@ -1516,6 +1590,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                         condition["condition_id"],
                         "shapley_sampled",
                         agent,
+                        fingerprint,
                     )
                     not in done_attr
                 ]
@@ -1537,7 +1612,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
 
                 if "loo" in methods:
                     for agent in roles:
-                        attribution_id = stable_id(
+                        attribution_id = _condition_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
@@ -1545,6 +1620,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                             condition["condition_id"],
                             "loo",
                             agent,
+                            fingerprint,
                         )
                         if attribution_id in done_attr:
                             print_progress(
@@ -1597,6 +1673,8 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                                 "ablated_coalition_id": ablated_row.get("coalition_id"),
                                 "full_permission_diagnostics": full_row.get("permission_diagnostics", {}),
                                 "ablated_permission_diagnostics": ablated_row.get("permission_diagnostics", {}),
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -1660,7 +1738,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                         )
 
                     for agent in roles:
-                        attribution_id = stable_id(
+                        attribution_id = _condition_attribution_id(
                             experiment.experiment_id,
                             task["task_id"],
                             architecture_id,
@@ -1668,6 +1746,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                             condition["condition_id"],
                             "shapley_sampled",
                             agent,
+                            fingerprint,
                         )
                         if attribution_id in done_attr:
                             print_progress(
@@ -1717,6 +1796,8 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                                 "shapley_samples": shapley_samples,
                                 "full_coalition_id": full_row.get("coalition_id"),
                                 "full_permission_diagnostics": full_row.get("permission_diagnostics", {}),
+                                "execution_fingerprint": fingerprint,
+                                "execution_treatment": treatment,
                             },
                         )
                         append_jsonl(attribution_path, [record])
@@ -1750,6 +1831,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
         "evaluation_file": str(evaluation_path),
         "statistics_file": str(statistics_path),
         "checkpointing": _use_checkpointing(),
+        "execution_fingerprint": fingerprint,
     }
     print_progress(f"[complete] {summary}")
     return summary

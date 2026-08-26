@@ -15,7 +15,8 @@ dependencies = [
   "networkx",
   "tqdm",
   "jsonlines",
-  "pyarrow"
+  "pyarrow",
+  "requests"
 ]
 
 [tool.setuptools.packages.find]

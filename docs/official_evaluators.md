@@ -9,8 +9,8 @@ The separation is necessary because official harnesses such as SWE-bench are bat
 
 ## Currently wired
 
-- HumanEval: local Docker Python unit tests.
-- MBPP: local Docker Python unit tests.
+- HumanEval: local Docker Python unit tests. Real `pass@1` requires `--execute-code`; formal runs should use Docker. The in-loop evaluator refuses unit-test scoring when execution is disabled rather than substituting text equality.
+- MBPP: local Docker Python unit tests, with the same `--execute-code` requirement as HumanEval.
 - AIME/HLE/GPQA: normalized exact-match fallback.
 - IFBench: partial rule-based fallback.
 - SWE-bench Lite / SWE-bench Verified: official prediction export plus `swebench.harness.run_evaluation` launcher.

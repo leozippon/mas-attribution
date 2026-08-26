@@ -9,7 +9,9 @@ from typing import Any
 from mas_contribution_bench.runners.common import (
     backup_existing_file,
     completed_run_ids,
+    identity_role_map,
     load_experiment,
+    mas_run_id,
     print_progress,
     run_mas_once,
     select_architectures,
@@ -82,19 +84,17 @@ def run_full_system(config_path: str | Path, max_tasks: int | None = None) -> di
                 continue
             for seed in seeds:
                 run_id_seed = f"task={task.get('task_id')} arch={architecture_id} seed={seed}"
-                from mas_contribution_bench.utils.io import stable_id
-
                 architecture = experiment.benchmark.architectures[architecture_id]
-                role_map_items = sorted((role, role) for role in architecture.roles)
-                run_id = stable_id(
-                    experiment.experiment_id,
+                run_id = mas_run_id(
+                    experiment,
                     task["task_id"],
                     architecture_id,
                     seed,
-                    [],
-                    "default",
-                    role_map_items,
-                    [],
+                    removed_agents=[],
+                    removal_protocol="none",
+                    role_map_items=sorted(identity_role_map(architecture.roles).items()),
+                    permission_overrides=None,
+                    condition_id=None,
                 )
                 if run_id in done:
                     print_progress(f"[skip] {completed}/{total} {run_id_seed} run_id={run_id}")
