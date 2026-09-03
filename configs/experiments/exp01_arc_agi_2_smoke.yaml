@@ -1,0 +1,88 @@
+id: exp01_arc_agi_2_smoke
+stage: 1
+name: ARC-AGI-2 format smoke test
+purpose: 'Estimate complete-system utility, cost, and traces for each architecture
+  on the fixed seeded seven-dataset subset. LiveCodeBench and SWE-bench Verified are
+  prediction/export-only in-loop.
+
+  '
+research_questions:
+- RQ1
+- RQ4
+- RQ6
+hypotheses:
+- H1
+- H2
+- H5
+datasets:
+- name: arc_agi_2
+  task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+  split: test
+  max_tasks: 1
+  task_selection: seeded_random
+architectures:
+  include:
+  - A1_pev
+  - A2_chain
+  - A3_dag
+  - A4_metagpt_lite
+  - A5_star
+  - A6_debate
+  - A7_graph
+seeds:
+- 0
+- 1
+- 2
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
+outputs:
+  run_dir: data/runs/arc_agi_2_smoke
+  trace_dir: data/traces/arc_agi_2_smoke
+  score_file: data/results/arc_agi_2_smoke/scores.jsonl
+benchmark_specs:
+  architecture_dir: configs/benchmark_specs/architectures
+  agent_dir: configs/benchmark_specs/agents
+  prompt_dir: configs/benchmark_specs/prompts
+  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+model:
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 2
+  managed_externally: true
+  managed_by: zhangqy
+  homogeneous: true
+  temperature: 0.2
+  max_tokens: 2048
+  timeout_seconds: 180
+logging:
+  save_run_records: true
+  save_full_trace: true
+  save_tool_calls: true
+  save_intermediate_outputs: true
+  save_cost: true
+  save_failure_type: true
+  trace_graphs:
+  - design_graph
+  - trace_graph
+  - dependency_graph
+evaluation:
+  primary_utility: task
+  secondary_utilities:
+  - net
+  - process
+  local_scored_datasets:
+  - arc_agi_2
+  prediction_export_only_datasets: []
+  notes: 'LiveCodeBench and SWE-bench Verified remain in-loop prediction/export-only
+    (score=None, passed=None) and are not attribution-eligible until official results
+    are joined.
+
+    '

@@ -28,6 +28,17 @@ When the task is from HumanEval, MBPP, or otherwise asks for code:
 - If no usable candidate exists, write a concise correct implementation directly from the task specification.
 - Put explanations, caveats, and verification notes in `summary`, `evidence`, and `failure_modes`, not in `artifact`.
 
+## ARC-AGI-2 Artifact Rules
+
+When the task is from ARC-AGI-2:
+
+- The `artifact` field must contain the predicted output grid itself.
+- For one test input, `artifact` must be a JSON array of rows, for example `[[0,1],[1,0]]`.
+- For multiple test inputs, `artifact` must be a JSON array of output grids, for example `[[[0,1],[1,0]],[[2,2],[2,0]]]`.
+- Do not put words such as `verified`, `valid`, `passed`, or natural-language descriptions in `artifact`.
+- If an earlier agent produced a valid grid, copy that grid exactly unless you are correcting it.
+- Put reasoning and confidence only in `summary`, `evidence`, and `failure_modes`.
+
 ## Role Boundaries
 
 - Do not introduce new unsupported functionality at the last step.

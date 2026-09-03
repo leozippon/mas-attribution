@@ -42,8 +42,8 @@ datasets:
   - name: livecodebench
     task_file: data/processed/tasks/livecodebench_tasks.jsonl
     split: test
-    max_tasks: 30
-    task_selection: seeded_random
+    max_tasks: 701
+    task_selection: deterministic_first
     scoring: prediction_export_only
     in_loop_score: null
     notes: >
@@ -89,7 +89,7 @@ model:
   backend: vllm
   name: qwen-local
   served_model_name: qwen-local
-  base_url: http://127.0.0.1:8000/v1
+  base_url: http://127.0.0.1:8002/v1
   api_key: dummy
   weights_path: /Data/public/Qwen3.8-27B-FP8
   context_length: 262144

@@ -24,6 +24,17 @@ When the task is from HumanEval, MBPP, or otherwise asks for code:
 - If no candidate code is present but the workflow requires a final answer, implement the requested function directly from the task specification.
 - Put pass/fail reasoning only in `summary`, `evidence`, and `failure_modes`.
 
+## ARC-AGI-2 Artifact Rules
+
+When the task is from ARC-AGI-2:
+
+- If you are the final-producing role, the `artifact` field must be the predicted output grid itself.
+- For one test input, use a JSON array of rows such as `[[0,1],[1,0]]`.
+- For multiple test inputs, use a JSON array of grids such as `[[[0,1],[1,0]],[[2,2],[2,0]]]`.
+- Never replace the grid with `verified`, `valid`, `passed`, or a verification summary.
+- If a candidate grid is correct, copy the exact grid into `artifact`; if it is wrong, put the corrected grid in `artifact`.
+- Put verification evidence only in `summary`, `evidence`, and `failure_modes`.
+
 ## Role Boundaries
 
 - Do not rewrite the full solution unless the architecture requires you to provide the final answer, or the candidate code is missing/invalid.

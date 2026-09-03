@@ -196,13 +196,22 @@ class DeepSeekModelClient:
         temperature = kwargs.get("temperature", 0.2)
         max_tokens = kwargs.get("max_tokens", 2048)
 
-        request_messages = self._prepare_messages(messages)
+        disable_thinking = kwargs.get("disable_thinking")
+        if disable_thinking is None:
+            disable_thinking = getattr(self, "disable_thinking", False)
+
+        request_messages = self._prepare_messages(messages, disable_thinking=bool(disable_thinking))
         payload = {
             "model": model,
             "messages": request_messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if disable_thinking:
+            # Qwen served by vLLM may place long hidden reasoning in a separate
+            # field and leave message.content empty unless thinking is disabled
+            # at chat-template render time.
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         seed = kwargs.get("seed")
         if seed is not None:
             payload["seed"] = int(seed)
@@ -273,9 +282,21 @@ class DeepSeekModelClient:
                 )
             raise RuntimeError(f"{self.provider_name} API request failed: {last_error}")
         try:
-            content = data["choices"][0]["message"]["content"] or ""
+            choice = data["choices"][0]
+            message = choice["message"]
+            content = message.get("content") or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Unexpected {self.provider_name} response: {data}") from exc
+        reasoning_content = message.get("reasoning") or message.get("reasoning_content") or ""
+        reasoning_used_as_content = False
+        if not content.strip() and reasoning_content and os.getenv("MAS_USE_REASONING_WHEN_EMPTY", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+            "n",
+        }:
+            content = str(reasoning_content)
+            reasoning_used_as_content = True
         self.last_usage = dict(data.get("usage") or {})
         self.last_cache_metadata = {
             "local_cache_hit": False,
@@ -283,6 +304,10 @@ class DeepSeekModelClient:
             "local_cache_path": str(cache_path),
             "provider_cache_hit_tokens": self.last_usage.get("prompt_cache_hit_tokens", 0),
             "provider_cache_miss_tokens": self.last_usage.get("prompt_cache_miss_tokens", 0),
+            "thinking_disabled": bool(payload.get("chat_template_kwargs", {}).get("enable_thinking") is False),
+            "finish_reason": choice.get("finish_reason"),
+            "has_reasoning": bool(reasoning_content),
+            "reasoning_used_as_content": reasoning_used_as_content,
         }
         if self._cache_enabled():
             row = {
@@ -291,9 +316,16 @@ class DeepSeekModelClient:
                 "model": model,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "chat_template_kwargs": payload.get("chat_template_kwargs"),
                 "messages": request_messages,
                 "content": content,
                 "usage": self.last_usage,
+                "response_metadata": {
+                    "finish_reason": choice.get("finish_reason"),
+                    "has_reasoning": bool(reasoning_content),
+                    "reasoning_used_as_content": reasoning_used_as_content,
+                    "thinking_disabled": bool(payload.get("chat_template_kwargs", {}).get("enable_thinking") is False),
+                },
             }
             self._append_cache_row(cache_path, row)
             self._load_cache_index(cache_path)[cache_key] = row
@@ -336,9 +368,11 @@ class OpenAICompatibleModelClient(DeepSeekModelClient):
             default_model_name="qwen-local",
         )
 
-    def _prepare_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    def _prepare_messages(self, messages: list[dict[str, str]], *, disable_thinking: bool | None = None) -> list[dict[str, str]]:
         prepared = [dict(message) for message in messages]
-        if not self.disable_thinking:
+        if disable_thinking is None:
+            disable_thinking = self.disable_thinking
+        if not disable_thinking:
             return prepared
         for message in reversed(prepared):
             if message.get("role") == "user":
@@ -366,6 +400,16 @@ class BaseAgent:
         self.model_client = model_client or DryRunModelClient()
         self.model_kwargs = model_kwargs or {}
 
+    def _env_dataset_set(self, name: str, default: str) -> set[str]:
+        raw = os.getenv(name, default)
+        return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+    def _env_int(self, name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except ValueError:
+            return default
+
     def _dataset_output_instruction(self, dataset: str) -> str:
         if dataset in {"swebench_lite", "swebench_verified", "teambench"}:
             return (
@@ -376,17 +420,42 @@ class BaseAgent:
         if dataset == "livecodebench":
             return (
                 "Official evaluation output requirement:\n"
-                "Return only executable Python solution code in the final artifact. Do not include explanations."
+                "The final artifact must contain only executable Python solution code. "
+                "Do not include Markdown fences, explanations, tests, or analysis inside artifact."
             )
         if dataset == "arc_agi_2":
             return (
                 "Official evaluation output requirement:\n"
-                "Return only the predicted output grid as JSON, e.g. [[1,2],[3,4]]."
+                "The final artifact must be only the predicted ARC output grid in strict JSON. "
+                "For one test case, use a 2D integer array such as [[1,2],[3,4]]. "
+                "For multiple test cases, use a list of 2D grids such as [[[1,2],[3,4]], [[0]]]. "
+                "Do not place Python code, a solve() function, Markdown, prose, rule descriptions, or training examples in artifact. "
+                "If you need to explain the rule, put that explanation in summary/evidence only."
             )
-        if dataset in {"aime_2026", "gpqa_diamond", "hle"}:
+        if dataset == "aime_2026":
             return (
                 "Official evaluation output requirement:\n"
-                "Return the final answer exactly and concisely in the final artifact. Avoid extra explanation in the artifact."
+                "The final artifact must be only the final integer answer, with no units, punctuation, prose, or derivation. "
+                "Put reasoning in summary/evidence only."
+            )
+        if dataset == "gpqa_diamond":
+            return (
+                "Official evaluation output requirement:\n"
+                "The final artifact must be only the exact answer choice text, not a letter unless the task explicitly asks for a letter. "
+                "Do not include explanations or caveats in artifact; put them in summary/evidence only."
+            )
+        if dataset == "hle":
+            return (
+                "Official evaluation output requirement:\n"
+                "The final artifact must be only the short final answer exactly as requested by the problem. "
+                "For yes/no questions, artifact must be only Yes or No. "
+                "Do not include derivations, references, or caveats in artifact."
+            )
+        if dataset == "ifbench":
+            return (
+                "Official evaluation output requirement:\n"
+                "The final artifact must be the user-facing response that follows every instruction in the prompt. "
+                "Do not describe the instructions; satisfy them directly."
             )
         return ""
 
@@ -486,10 +555,37 @@ class BaseAgent:
         dataset = str(task.get("dataset") or "").lower()
         model_kwargs = dict(self.model_kwargs)
         if dataset == "arc_agi_2":
-            # ARC-AGI-2 grids are long but the required answer is only a JSON grid.
-            # Keeping completion short prevents vLLM context overflow on 16k servers.
+            # ARC-AGI-2 answers can be as large as a 30x30 grid; keep
+            # enough completion budget so strict JSON grids are not truncated.
             current_max_tokens = model_kwargs.get("max_tokens")
-            model_kwargs["max_tokens"] = min(int(current_max_tokens or 256), 256)
+            arc_max_tokens = self._env_int("MAS_ARC_MAX_TOKENS", 4096)
+            if current_max_tokens is None:
+                model_kwargs["max_tokens"] = arc_max_tokens
+            else:
+                model_kwargs["max_tokens"] = max(int(current_max_tokens), arc_max_tokens)
+            model_kwargs["disable_thinking"] = os.getenv("MAS_ARC_DISABLE_THINKING", "1").lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+        reasoning_datasets = self._env_dataset_set(
+            "MAS_QWEN_REASONING_DATASETS",
+            "aime_2026,gpqa_diamond,hle",
+        )
+        reasoning_roles = self._env_dataset_set(
+            "MAS_QWEN_REASONING_ROLES",
+            "coder,executor,debugger,finalizer,aggregator,supervisor",
+        )
+        if dataset in reasoning_datasets and self.role in reasoning_roles and os.getenv("MAS_QWEN_REASONING", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+            "n",
+        }:
+            current_max_tokens = int(model_kwargs.get("max_tokens") or 2048)
+            model_kwargs["max_tokens"] = max(current_max_tokens, self._env_int("MAS_QWEN_REASONING_MAX_TOKENS", 4096))
+            model_kwargs["disable_thinking"] = False
         if model_kwargs.get("seed") is None and state.get("seed") is not None:
             model_kwargs["seed"] = int(state["seed"])
         content = self.model_client.complete(

@@ -110,6 +110,7 @@ class MASGraphBuilder:
         else:
             final_answer = self._default_final_answer(state, order)
 
+        final_answer = self._normalize_task_final_answer(state, final_answer)
         state["final_answer"] = final_answer
         return MASExecutionResult(state=state, final_answer=final_answer)
 
@@ -382,3 +383,52 @@ class MASGraphBuilder:
                 return preferred
 
         return order[-1] if order else None
+
+    def _normalize_task_final_answer(self, state: dict[str, Any], final_answer: str) -> str:
+        task = state.get("task") or {}
+        dataset = str(task.get("dataset") or "").lower()
+        if dataset != "arc_agi_2":
+            return final_answer
+        return self._normalize_arc_final_answer(state, final_answer)
+
+    def _normalize_arc_final_answer(self, state: dict[str, Any], final_answer: str) -> str:
+        """For ARC-AGI-2, submit a strict JSON grid whenever any agent produced one."""
+        try:
+            from mas_contribution_bench.evaluation.official_task_eval import (
+                extract_arc_prediction_json,
+            )
+        except Exception:
+            return final_answer
+
+        candidates: list[tuple[str, str]] = [("selected_final_answer", str(final_answer or ""))]
+        agent_outputs = state.get("agent_outputs") or {}
+        for role, output in reversed(list(agent_outputs.items())):
+            if not isinstance(output, dict):
+                continue
+            content = str(output.get("content") or "")
+            if content.strip():
+                candidates.append((role, content))
+
+        for source_role, content in candidates:
+            extracted = extract_arc_prediction_json(content)
+            if extracted:
+                diagnostics = dict(state.get("arc_agi_2_diagnostics") or {})
+                diagnostics.update(
+                    {
+                        "final_answer_was_normalized": extracted != str(final_answer or ""),
+                        "grid_source_role": source_role,
+                    }
+                )
+                state["arc_agi_2_diagnostics"] = diagnostics
+                return extracted
+
+        diagnostics = dict(state.get("arc_agi_2_diagnostics") or {})
+        diagnostics.update(
+            {
+                "final_answer_was_normalized": False,
+                "grid_source_role": None,
+                "normalization_failure": "no_json_grid_found_in_agent_outputs",
+            }
+        )
+        state["arc_agi_2_diagnostics"] = diagnostics
+        return final_answer

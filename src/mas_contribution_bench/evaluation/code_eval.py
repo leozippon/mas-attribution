@@ -176,14 +176,26 @@ def evaluate_task_output(
 ) -> EvaluationRecord:
     evaluator_type = _evaluator_type_name(task)
     dataset = str(task.get("dataset", "")).lower()
-    official = evaluate_official_answer_task(task, final_answer) if dataset in {
-        "aime_2026",
-        "gpqa_diamond",
-        "hle",
-        "arc_agi_2",
-        "ifbench",
-    } else None
     extra_metadata: dict[str, Any] = {}
+    if dataset in {"aime_2026", "gpqa_diamond", "hle", "arc_agi_2", "ifbench"}:
+        try:
+            official = evaluate_official_answer_task(task, final_answer)
+        except ValueError as exc:
+            official = (
+                0.0,
+                False,
+                FailureType.INVALID_FORMAT,
+                {"evaluator": "official_task_eval", "error": str(exc)},
+            )
+        except Exception as exc:
+            official = (
+                0.0,
+                False,
+                FailureType.EVALUATOR_ERROR,
+                {"evaluator": "official_task_eval", "error": repr(exc)},
+            )
+    else:
+        official = None
     if official is not None:
         score, passed, failure_type, raw_output = official
     elif dataset in {"livecodebench", "swebench_verified"}:

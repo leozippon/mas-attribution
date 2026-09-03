@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import os
 import random
 from pathlib import Path
@@ -38,6 +39,15 @@ from mas_contribution_bench.utils.seeds import set_seed
 
 def _use_checkpointing() -> bool:
     return os.getenv("MAS_DISABLE_CHECKPOINT", "").lower() not in {"1", "true", "yes", "y"}
+
+
+def _max_parallel_runs() -> int:
+    """Return the bounded number of independent baseline runs to execute together."""
+    value = os.getenv("MAS_MAX_CONCURRENCY", "1")
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return 1
 
 
 def _final_role(roles: list[str]) -> str | None:
@@ -143,7 +153,10 @@ def _roles_for_spec(spec: dict[str, Any], task_id: str, seed: int) -> list[str]:
 def _run_baseline_once(experiment, task: dict[str, Any], spec: dict[str, Any], seed: int):
     roles = _roles_for_spec(spec, task["task_id"], seed)
     baseline_id = spec["id"]
-    set_seed(seed)
+    # The model request itself receives ``seed`` below. Avoid mutating process-
+    # global RNG state when independent runs are executed in worker threads.
+    if _max_parallel_runs() == 1:
+        set_seed(seed)
     treatment = execution_treatment(experiment, removal_protocol="none")
     fingerprint = execution_fingerprint(experiment, removal_protocol="none")
     run_id = _baseline_run_id(experiment, task, spec, seed, roles)
@@ -227,7 +240,12 @@ def run_single_agent_baseline(config_path: str | Path, max_tasks: int | None = N
     written_runs = 0
     written_traces = 0
     written_evaluations = 0
-    print_progress(f"[start] experiment={experiment.experiment_id} total_runs={total} already_done={completed}")
+    parallelism = _max_parallel_runs()
+    print_progress(
+        f"[start] experiment={experiment.experiment_id} total_runs={total} "
+        f"already_done={completed} parallelism={parallelism}"
+    )
+    jobs: list[tuple[int, dict[str, Any], dict[str, Any], int, str]] = []
     for task_index, task in enumerate(tasks, start=1):
         for spec in specs:
             for seed in seeds:
@@ -237,20 +255,42 @@ def run_single_agent_baseline(config_path: str | Path, max_tasks: int | None = N
                 if run_id in done:
                     print_progress(f"[skip] {completed}/{total} {label} run_id={run_id}")
                     continue
-                print_progress(f"[run] {completed + 1}/{total} task_index={task_index}/{len(tasks)} {label}")
-                run, traces, evaluation = _run_baseline_once(experiment, task, spec, seed)
-                append_jsonl(run_path, [run])
-                append_jsonl(trace_path, traces)
-                append_jsonl(eval_path, [evaluation])
-                done.add(run.run_id)
-                completed += 1
-                written_runs += 1
-                written_traces += len(traces)
-                written_evaluations += 1
-                print_progress(
-                    f"[done] {completed}/{total} run_id={run.run_id} score={evaluation.score} "
-                    f"passed={evaluation.passed} failure={evaluation.failure_type} traces={len(traces)}"
-                )
+                jobs.append((task_index, task, spec, seed, label))
+
+    def persist(result: tuple[Any, list[Any], Any]) -> None:
+        nonlocal completed, written_runs, written_traces, written_evaluations
+        run, traces, evaluation = result
+        append_jsonl(run_path, [run])
+        append_jsonl(trace_path, traces)
+        append_jsonl(eval_path, [evaluation])
+        done.add(run.run_id)
+        completed += 1
+        written_runs += 1
+        written_traces += len(traces)
+        written_evaluations += 1
+        print_progress(
+            f"[done] {completed}/{total} run_id={run.run_id} score={evaluation.score} "
+            f"passed={evaluation.passed} failure={evaluation.failure_type} traces={len(traces)}"
+        )
+
+    if parallelism == 1:
+        for task_index, task, spec, seed, label in jobs:
+            print_progress(f"[run] {completed + 1}/{total} task_index={task_index}/{len(tasks)} {label}")
+            persist(_run_baseline_once(experiment, task, spec, seed))
+    else:
+        with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="exp02") as executor:
+            pending: dict[Future, tuple[int, str]] = {}
+            for task_index, task, spec, seed, label in jobs:
+                print_progress(f"[submit] task_index={task_index}/{len(tasks)} {label}")
+                future = executor.submit(_run_baseline_once, experiment, task, spec, seed)
+                pending[future] = (task_index, label)
+            for future in as_completed(pending):
+                task_index, label = pending[future]
+                try:
+                    persist(future.result())
+                except Exception as exc:
+                    print_progress(f"[failed] task_index={task_index}/{len(tasks)} {label} error={type(exc).__name__}: {exc}")
+                    raise
     summary = {
         "runs": completed,
         "new_runs": written_runs,

@@ -37,8 +37,24 @@ def load_tasks(task_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def latest_by_run(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    # Keep all architecture/seed outputs. Official eval may later aggregate by run.
-    return list(rows)
+    # Keep the latest row for each task inside one exported model/configuration.
+    # Official evaluators expect at most one prediction per task instance.
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        deduped[str(row.get("task_id"))] = row
+    return list(deduped.values())
+
+
+def load_run_index(run_file: Path | None) -> dict[str, dict[str, Any]]:
+    if run_file is None or not run_file.exists():
+        return {}
+    return {str(row.get("run_id")): row for row in iter_jsonl(run_file) if row.get("run_id")}
+
+
+def config_output_dir(base_dir: Path, dataset: str, architecture_id: str, seed: Any) -> Path:
+    safe_arch = str(architecture_id or "unknown_architecture").replace("/", "_")
+    safe_seed = str(seed if seed is not None else "unknown_seed").replace("/", "_")
+    return ensure_dir(base_dir / dataset / f"{safe_arch}__seed_{safe_seed}")
 
 
 def export_swebench(rows: list[dict[str, Any]], dataset: str, output_dir: Path, model_name: str) -> dict[str, Any]:
@@ -65,6 +81,13 @@ def export_swebench(rows: list[dict[str, Any]], dataset: str, output_dir: Path, 
 
 
 def export_livecodebench(rows: list[dict[str, Any]], dataset: str, output_dir: Path, model_name: str) -> dict[str, Any]:
+    """Export LiveCodeBench custom-evaluator predictions.
+
+    LiveCodeBench's official custom evaluator expects one JSON array file whose
+    entries contain a question_id and a list of candidate programs. Keeping this
+    format separate from JSONL avoids silently feeding the official runner a file
+    it cannot parse.
+    """
     exported = []
     skipped = Counter()
     for row in rows:
@@ -82,9 +105,15 @@ def export_livecodebench(rows: list[dict[str, Any]], dataset: str, output_dir: P
                 "architecture_id": row.get("architecture_id"),
             }
         )
-    path = output_dir / f"{dataset}_predictions.jsonl"
-    write_jsonl(path, exported)
-    return {"dataset": dataset, "path": str(path), "records": len(exported), "skipped": dict(skipped)}
+    path = output_dir / f"{dataset}_predictions.json"
+    path.write_text(json.dumps(exported, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {
+        "dataset": dataset,
+        "path": str(path),
+        "format": "livecodebench_custom_json",
+        "records": len(exported),
+        "skipped": dict(skipped),
+    }
 
 
 def export_generic_answers(rows: list[dict[str, Any]], dataset: str, output_dir: Path, model_name: str) -> dict[str, Any]:
@@ -115,26 +144,55 @@ def main() -> int:
     parser.add_argument("--output-dir", default="data/results/official_predictions", help="Directory for exported predictions.")
     parser.add_argument("--model-name", default="qwen-local")
     parser.add_argument("--dataset", action="append", default=None, help="Optional dataset filter; repeatable.")
+    parser.add_argument("--architecture-id", action="append", default=None, help="Optional architecture filter; repeatable.")
+    parser.add_argument("--seed", action="append", type=int, default=None, help="Optional seed filter; repeatable. Requires --run-file when seed is absent from score rows.")
+    parser.add_argument("--run-file", default=None, help="Optional run JSONL used to join seed/config metadata by run_id.")
+    parser.add_argument("--split-by-config", action="store_true", help="Write one official prediction file per dataset/architecture/seed.")
     args = parser.parse_args()
 
     output_dir = ensure_dir(PROJECT_ROOT / args.output_dir)
     selected = set(args.dataset or [])
-    rows_by_dataset: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    selected_architectures = set(args.architecture_id or [])
+    selected_seeds = set(args.seed or [])
+    run_file = PROJECT_ROOT / args.run_file if args.run_file else None
+    run_index = load_run_index(run_file)
+    rows_by_group: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in iter_jsonl(PROJECT_ROOT / args.score_file):
+        row = dict(row)
         dataset = str(row.get("dataset"))
         if selected and dataset not in selected:
             continue
-        rows_by_dataset[dataset].append(row)
+        architecture_id = str(row.get("architecture_id") or "")
+        if selected_architectures and architecture_id not in selected_architectures:
+            continue
+        run_meta = run_index.get(str(row.get("run_id")), {})
+        seed = row.get("seed", run_meta.get("seed"))
+        row["_seed"] = seed
+        if selected_seeds and seed not in selected_seeds:
+            continue
+        if args.split_by_config:
+            key = (dataset, architecture_id, seed)
+        else:
+            key = (dataset,)
+        rows_by_group[key].append(row)
 
     summaries = []
-    for dataset, rows in sorted(rows_by_dataset.items()):
+    for key, rows in sorted(rows_by_group.items(), key=lambda item: tuple(str(part) for part in item[0])):
+        dataset = str(key[0])
+        architecture_id = str(key[1]) if len(key) > 1 else None
+        seed = key[2] if len(key) > 2 else None
+        group_output_dir = config_output_dir(output_dir, dataset, architecture_id, seed) if args.split_by_config else output_dir
         rows = latest_by_run(rows)
         if dataset in {"swebench_lite", "swebench_verified"}:
-            summaries.append(export_swebench(rows, dataset, output_dir, args.model_name))
+            summary = export_swebench(rows, dataset, group_output_dir, args.model_name)
         elif dataset == "livecodebench":
-            summaries.append(export_livecodebench(rows, dataset, output_dir, args.model_name))
+            summary = export_livecodebench(rows, dataset, group_output_dir, args.model_name)
         else:
-            summaries.append(export_generic_answers(rows, dataset, output_dir, args.model_name))
+            summary = export_generic_answers(rows, dataset, group_output_dir, args.model_name)
+        if args.split_by_config:
+            summary["architecture_id"] = architecture_id
+            summary["seed"] = seed
+        summaries.append(summary)
 
     summary_path = output_dir / "export_summary.json"
     summary_path.write_text(json.dumps({"score_file": args.score_file, "outputs": summaries}, indent=2, ensure_ascii=False), encoding="utf-8")

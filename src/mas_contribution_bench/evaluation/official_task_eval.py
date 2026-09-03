@@ -8,13 +8,20 @@ external harness scripts.
 
 from __future__ import annotations
 
+import ast
 import json
+import os
 import re
 import string
+import subprocess
+import sys
 from typing import Any
 
 from mas_contribution_bench.data.external import extract_arc_expected_outputs, resolve_gpqa_gold
 from mas_contribution_bench.data.schemas import FailureType
+
+
+_IFBENCH_UNAVAILABLE_REASON: str | None = None
 
 
 def unwrap_answer(text: str | None) -> str:
@@ -98,15 +105,75 @@ def exact_answer_eval(task: dict[str, Any], prediction: str | None) -> tuple[flo
 def _load_jsonish(text: str | None) -> Any:
     value = unwrap_answer(text)
     candidates = [value]
-    match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", value)
-    if match:
-        candidates.append(match.group(1))
+    candidates.extend(_balanced_json_candidates(value))
+    for field in ("artifact", "answer", "prediction", "output", "outputs", "final_answer"):
+        field_match = re.search(
+            rf'"{field}"\s*:\s*"((?:\\.|[^"\\])*)"',
+            value,
+            flags=re.S,
+        )
+        if field_match:
+            try:
+                candidates.append(json.loads(f'"{field_match.group(1)}"'))
+            except Exception:
+                candidates.append(field_match.group(1))
     for candidate in candidates:
         try:
             return json.loads(candidate)
         except Exception:
+            pass
+        try:
+            return ast.literal_eval(candidate)
+        except Exception:
             continue
     return None
+
+
+def _balanced_json_candidates(text: str | None) -> list[str]:
+    """Return balanced JSON/Python literal substrings from noisy model output."""
+    if not text:
+        return []
+    value = str(text)
+    candidates: list[str] = []
+    stack: list[str] = []
+    start: int | None = None
+    in_string = False
+    quote = ""
+    escape = False
+    pairs = {"{": "}", "[": "]"}
+    closers = set(pairs.values())
+
+    for idx, ch in enumerate(value):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                in_string = False
+            continue
+
+        if ch in {'"', "'"}:
+            in_string = True
+            quote = ch
+            continue
+
+        if ch in pairs:
+            if not stack:
+                start = idx
+            stack.append(pairs[ch])
+            continue
+
+        if ch in closers and stack:
+            expected = stack.pop()
+            if ch != expected:
+                stack = []
+                start = None
+                continue
+            if not stack and start is not None:
+                candidates.append(value[start : idx + 1])
+                start = None
+    return candidates
 
 
 def _extract_arc_expected(task: dict[str, Any]) -> list[Any]:
@@ -123,29 +190,133 @@ def _extract_arc_expected(task: dict[str, Any]) -> list[Any]:
     return expected
 
 
-def _extract_arc_prediction(prediction: str | None) -> list[Any]:
-    raw = _load_jsonish(prediction)
+def _coerce_arc_cell(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and 0 <= value <= 9:
+        return value
+    if isinstance(value, float) and value.is_integer() and 0 <= int(value) <= 9:
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"[0-9]", value.strip()):
+        return int(value.strip())
+    return None
+
+
+def _normalize_arc_grid(raw: Any) -> list[list[int]] | None:
+    if not isinstance(raw, list) or not raw:
+        return None
+    normalized: list[list[int]] = []
+    width: int | None = None
+    for row in raw:
+        if not isinstance(row, list) or not row:
+            return None
+        normalized_row: list[int] = []
+        for cell in row:
+            coerced = _coerce_arc_cell(cell)
+            if coerced is None:
+                return None
+            normalized_row.append(coerced)
+        if width is None:
+            width = len(normalized_row)
+        elif len(normalized_row) != width:
+            return None
+        normalized.append(normalized_row)
+    height = len(normalized)
+    if width is None or height > 30 or width > 30:
+        return None
+    return normalized
+
+
+def _normalize_arc_outputs(raw: Any, expected_count: int | None = None) -> list[list[list[int]]]:
     if isinstance(raw, dict):
-        for key in ("outputs", "output", "answer", "prediction"):
+        for key in ("outputs", "output", "answer", "prediction", "artifact", "final_answer", "solution"):
             if key in raw:
-                raw = raw[key]
-                break
-    if raw is None:
+                return _normalize_arc_outputs(raw[key], expected_count=expected_count)
         return []
+
+    if isinstance(raw, str):
+        nested = _load_jsonish(raw)
+        if nested is None or nested == raw:
+            return []
+        return _normalize_arc_outputs(nested, expected_count=expected_count)
+
+    grid = _normalize_arc_grid(raw)
+    if grid is not None:
+        return [grid]
+
     if isinstance(raw, list):
-        if raw and all(isinstance(row, list) and (not row or isinstance(row[0], int)) for row in raw):
-            return [raw]
-        return raw
+        outputs: list[list[list[int]]] = []
+        for item in raw:
+            normalized = _normalize_arc_grid(item)
+            if normalized is None:
+                return []
+            outputs.append(normalized)
+        if expected_count is not None and len(outputs) != expected_count:
+            return outputs
+        return outputs
+
     return []
+
+
+def _extract_arc_prediction(prediction: str | None, expected_count: int | None = None) -> list[Any]:
+    raw = _load_jsonish(prediction)
+    outputs = _normalize_arc_outputs(raw, expected_count=expected_count)
+    if outputs:
+        return outputs
+
+    # If the whole response is not parseable JSON but contains a complete
+    # artifact/output array inside prose or a partly malformed JSON object, try
+    # each balanced array/object candidate independently.
+    for candidate in _balanced_json_candidates(unwrap_answer(prediction)):
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(candidate)
+            except Exception:
+                continue
+        outputs = _normalize_arc_outputs(parsed, expected_count=expected_count)
+        if outputs:
+            return outputs
+
+    # Last resort: search specifically after ARC-ish field names so a complete
+    # artifact array can still be recovered from a malformed surrounding object.
+    value = unwrap_answer(prediction)
+    for field in ("artifact", "outputs", "output", "answer", "prediction", "final_answer"):
+        marker = re.search(rf'["\']?{field}["\']?\s*:', value)
+        if not marker:
+            continue
+        tail = value[marker.end() :]
+        outputs = _normalize_arc_outputs(_load_jsonish(tail), expected_count=expected_count)
+        if outputs:
+            return outputs
+
+    return []
+
+
+def extract_arc_prediction_json(prediction: str | None, expected_count: int | None = None) -> str | None:
+    """Extract a strict ARC-AGI-2 JSON grid/list-of-grids from a model response."""
+    outputs = _extract_arc_prediction(prediction, expected_count=expected_count)
+    if not outputs:
+        return None
+    if expected_count == 1 or len(outputs) == 1:
+        payload: Any = outputs[0]
+    else:
+        payload = outputs
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def arc_agi_2_eval(task: dict[str, Any], prediction: str | None) -> tuple[float, bool, FailureType, dict[str, Any]]:
     expected = _extract_arc_expected(task)
-    predicted = _extract_arc_prediction(prediction)
+    predicted = _extract_arc_prediction(prediction, expected_count=len(expected) if expected else None)
     if not expected:
         return 0.0, False, FailureType.UNKNOWN, {"evaluator": "arc_agi_2_exact_grid", "reason": "missing_expected_outputs"}
     if not predicted:
-        return 0.0, False, FailureType.INVALID_FORMAT, {"evaluator": "arc_agi_2_exact_grid", "reason": "prediction_not_json_grid"}
+        return 0.0, False, FailureType.INVALID_FORMAT, {
+            "evaluator": "arc_agi_2_exact_grid",
+            "reason": "prediction_not_json_grid",
+            "prediction_preview": str(prediction or "")[:500],
+        }
     checks = [idx < len(predicted) and predicted[idx] == answer for idx, answer in enumerate(expected)]
     passed = bool(checks) and all(checks) and len(predicted) >= len(expected)
     return (1.0 if passed else 0.0), passed, (FailureType.NONE if passed else FailureType.TEST_FAILURE), {
@@ -169,6 +340,37 @@ def load_ifbench_instructions_registry() -> Any:
     the package. Runtime IFBench evaluation must call this after empty-output
     handling.
     """
+    global _IFBENCH_UNAVAILABLE_REASON
+    if _IFBENCH_UNAVAILABLE_REASON:
+        raise RuntimeError(_IFBENCH_UNAVAILABLE_REASON)
+
+    timeout = float(os.getenv("MAS_IFBENCH_IMPORT_TIMEOUT", "30"))
+    probe = (
+        "from ifbench import instructions_registry; "
+        "print(len(getattr(instructions_registry, 'INSTRUCTION_DICT', {})))"
+    )
+    try:
+        probe_result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        reason = (
+            f"{IFBENCH_PACKAGE_ERROR} Import timed out after {timeout:.1f}s; "
+            "pre-download NLTK resources or set MAS_IFBENCH_IMPORT_TIMEOUT higher."
+        )
+        raise RuntimeError(reason) from exc
+
+    if probe_result.returncode != 0:
+        reason = (
+            f"{IFBENCH_PACKAGE_ERROR} Import probe failed: "
+            f"{(probe_result.stderr or probe_result.stdout)[-1000:]}"
+        )
+        raise RuntimeError(reason)
+
     try:
         from ifbench import instructions_registry  # pyright: ignore[reportMissingImports]
     except ImportError as exc:

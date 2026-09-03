@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,17 @@ from mas_contribution_bench.utils.io import append_jsonl
 
 def _use_checkpointing() -> bool:
     return os.getenv("MAS_DISABLE_CHECKPOINT", "").lower() not in {"1", "true", "yes", "y"}
+
+
+def _run_concurrency() -> int:
+    raw = os.getenv("MAS_RUN_CONCURRENCY", "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"MAS_RUN_CONCURRENCY must be an integer, got {raw!r}") from None
+    return max(1, value)
 
 
 def run_full_system(config_path: str | Path, max_tasks: int | None = None) -> dict[str, Any]:
@@ -76,7 +88,12 @@ def run_full_system(config_path: str | Path, max_tasks: int | None = None) -> di
     written_runs = 0
     written_traces = 0
     written_evaluations = 0
-    print_progress(f"[start] experiment={experiment.experiment_id} total_runs={total} already_done={completed}")
+    concurrency = _run_concurrency()
+    print_progress(
+        f"[start] experiment={experiment.experiment_id} total_runs={total} "
+        f"already_done={completed} concurrency={concurrency}"
+    )
+    pending: list[tuple[int, int, dict[str, Any], str, int, str]] = []
     for task_index, task in enumerate(tasks, start=1):
         for architecture_id in architectures:
             if architecture_id not in experiment.benchmark.architectures:
@@ -99,25 +116,75 @@ def run_full_system(config_path: str | Path, max_tasks: int | None = None) -> di
                 if run_id in done:
                     print_progress(f"[skip] {completed}/{total} {run_id_seed} run_id={run_id}")
                     continue
-                print_progress(f"[run] {completed + 1}/{total} task_index={task_index}/{len(tasks)} {run_id_seed}")
-                try:
-                    run, trace, evaluation = run_mas_once(experiment, task, architecture_id, seed)
-                except Exception as exc:
-                    print_progress(f"[error] {run_id_seed} {type(exc).__name__}: {exc}")
-                    raise
-                append_jsonl(run_path, [run])
-                append_jsonl(trace_path, trace)
-                append_jsonl(eval_path, [evaluation])
-                done.add(run.run_id)
-                completed += 1
-                written_runs += 1
-                written_traces += len(trace)
-                written_evaluations += 1
-                print_progress(
-                    f"[done] {completed}/{total} run_id={run.run_id} "
-                    f"score={getattr(evaluation, 'score', None)} passed={getattr(evaluation, 'passed', None)} "
-                    f"failure={getattr(evaluation, 'failure_type', None)} traces={len(trace)}"
-                )
+                pending.append((task_index, len(tasks), task, architecture_id, seed, run_id_seed))
+
+    if concurrency <= 1:
+        for task_index, task_count, task, architecture_id, seed, run_id_seed in pending:
+            print_progress(f"[run] {completed + 1}/{total} task_index={task_index}/{task_count} {run_id_seed}")
+            try:
+                run, trace, evaluation = run_mas_once(experiment, task, architecture_id, seed)
+            except Exception as exc:
+                print_progress(f"[error] {run_id_seed} {type(exc).__name__}: {exc}")
+                raise
+            append_jsonl(run_path, [run])
+            append_jsonl(trace_path, trace)
+            append_jsonl(eval_path, [evaluation])
+            done.add(run.run_id)
+            completed += 1
+            written_runs += 1
+            written_traces += len(trace)
+            written_evaluations += 1
+            print_progress(
+                f"[done] {completed}/{total} run_id={run.run_id} "
+                f"score={getattr(evaluation, 'score', None)} passed={getattr(evaluation, 'passed', None)} "
+                f"failure={getattr(evaluation, 'failure_type', None)} traces={len(trace)}"
+            )
+    else:
+        pending_iter = iter(pending)
+        in_flight: dict[Any, tuple[int, int, str]] = {}
+
+        def submit_next(executor: ThreadPoolExecutor) -> bool:
+            try:
+                task_index, task_count, task, architecture_id, seed, run_id_seed = next(pending_iter)
+            except StopIteration:
+                return False
+            print_progress(
+                f"[submit] {completed + len(in_flight) + 1}/{total} "
+                f"task_index={task_index}/{task_count} {run_id_seed}"
+            )
+            future = executor.submit(run_mas_once, experiment, task, architecture_id, seed)
+            in_flight[future] = (task_index, task_count, run_id_seed)
+            return True
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            for _ in range(concurrency):
+                if not submit_next(executor):
+                    break
+            while in_flight:
+                finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    task_index, task_count, run_id_seed = in_flight.pop(future)
+                    try:
+                        run, trace, evaluation = future.result()
+                    except Exception as exc:
+                        print_progress(f"[error] {run_id_seed} {type(exc).__name__}: {exc}")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    append_jsonl(run_path, [run])
+                    append_jsonl(trace_path, trace)
+                    append_jsonl(eval_path, [evaluation])
+                    done.add(run.run_id)
+                    completed += 1
+                    written_runs += 1
+                    written_traces += len(trace)
+                    written_evaluations += 1
+                    print_progress(
+                        f"[done] {completed}/{total} task_index={task_index}/{task_count} "
+                        f"run_id={run.run_id} score={getattr(evaluation, 'score', None)} "
+                        f"passed={getattr(evaluation, 'passed', None)} "
+                        f"failure={getattr(evaluation, 'failure_type', None)} traces={len(trace)}"
+                    )
+                    submit_next(executor)
     summary = {
         "runs": completed,
         "new_runs": written_runs,

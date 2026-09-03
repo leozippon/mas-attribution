@@ -8,6 +8,7 @@ from typing import Any
 
 
 DIFF_RE = re.compile(r"diff --git a/.+?(?=\n(?:diff --git a/|$))", flags=re.DOTALL)
+TOOL_CALL_JSON_RE = re.compile(r"<tool_call>\s*(?:<\|im_start\|>)?function=[^\n]*\n(?P<payload>\{.*?\})\s*(?:</tool_call>)?", flags=re.DOTALL)
 
 
 def unwrap_model_answer(text: str | None) -> str:
@@ -15,6 +16,17 @@ def unwrap_model_answer(text: str | None) -> str:
     if not text:
         return ""
     stripped = text.strip()
+    tool_match = TOOL_CALL_JSON_RE.search(stripped)
+    if tool_match:
+        try:
+            payload = json.loads(tool_match.group("payload"))
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("code", "model_patch", "patch", "diff", "answer", "final_answer", "solution", "artifact"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return unwrap_model_answer(value)
     if "```" in stripped:
         parts = stripped.split("```")
         for part in parts[1::2]:
