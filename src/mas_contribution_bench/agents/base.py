@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import time
+from threading import RLock
 from typing import Any, ClassVar, Protocol
 
 import requests
@@ -63,6 +64,7 @@ class DeepSeekModelClient:
     """
 
     _shared_cache_indexes: ClassVar[dict[str, dict[str, dict[str, Any]]]] = {}
+    _cache_lock: ClassVar[RLock] = RLock()
 
     def __init__(
         self,
@@ -113,29 +115,31 @@ class DeepSeekModelClient:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _load_cache_index(self, path: Path) -> dict[str, dict[str, Any]]:
-        cache_id = str(path)
-        if cache_id in self._shared_cache_indexes:
-            return self._shared_cache_indexes[cache_id]
-        index: dict[str, dict[str, Any]] = {}
-        if path.exists():
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    key = row.get("cache_key")
-                    if key:
-                        index[str(key)] = row
-        self._shared_cache_indexes[cache_id] = index
-        return index
+        with self._cache_lock:
+            cache_id = str(path)
+            if cache_id in self._shared_cache_indexes:
+                return self._shared_cache_indexes[cache_id]
+            index: dict[str, dict[str, Any]] = {}
+            if path.exists():
+                with path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        key = row.get("cache_key")
+                        if key:
+                            index[str(key)] = row
+            self._shared_cache_indexes[cache_id] = index
+            return index
 
     def _append_cache_row(self, path: Path, row: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with self._cache_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _llm_error_fallback_enabled(self) -> bool:
         env = os.getenv("MAS_LLM_ERROR_FALLBACK")
@@ -218,8 +222,8 @@ class DeepSeekModelClient:
         cache_path = self._cache_path(str(model))
         cache_key = self._cache_key(payload)
         if self._cache_enabled():
-            cache_index = self._load_cache_index(cache_path)
-            cached = cache_index.get(cache_key)
+            with self._cache_lock:
+                cached = self._load_cache_index(cache_path).get(cache_key)
             if cached is not None:
                 self.last_usage = dict(cached.get("usage") or {})
                 self.last_cache_metadata = {
@@ -327,8 +331,9 @@ class DeepSeekModelClient:
                     "thinking_disabled": bool(payload.get("chat_template_kwargs", {}).get("enable_thinking") is False),
                 },
             }
-            self._append_cache_row(cache_path, row)
-            self._load_cache_index(cache_path)[cache_key] = row
+            with self._cache_lock:
+                self._append_cache_row(cache_path, row)
+                self._load_cache_index(cache_path)[cache_key] = row
         return content
 
 

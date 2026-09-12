@@ -6,7 +6,9 @@ import math
 import os
 import random
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from mas_contribution_bench.data.schemas import (
@@ -37,6 +39,17 @@ from mas_contribution_bench.utils.io import append_jsonl, iter_jsonl, stable_id
 
 def _use_checkpointing() -> bool:
     return os.getenv("MAS_DISABLE_CHECKPOINT", "").lower() not in {"1", "true", "yes", "y"}
+
+
+def _attribution_concurrency() -> int:
+    raw = os.getenv("MAS_ATTRIBUTION_CONCURRENCY", "1").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"MAS_ATTRIBUTION_CONCURRENCY must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError("MAS_ATTRIBUTION_CONCURRENCY must be at least 1")
+    return value
 
 
 def _mean(values: list[float]) -> float:
@@ -469,16 +482,20 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
     ]
 
     total = len(tasks) * len(seeds) * sum(len(roles) for _, roles in architecture_roles) * len(methods)
+    concurrency = _attribution_concurrency()
     completed = len(done_attr)
     written_runs = 0
     written_traces = 0
     written_evaluations = 0
     written_attribution = 0
     written_coalitions = 0
+    state_lock = RLock()
+    executor = ThreadPoolExecutor(max_workers=concurrency) if concurrency > 1 else None
+    futures = []
 
     print_progress(
         f"[start] experiment={experiment.experiment_id} methods={methods} "
-        f"total_attributions={total} already_done={completed}"
+        f"total_attributions={total} already_done={completed} concurrency={concurrency}"
     )
 
     def evaluate_coalition(
@@ -499,7 +516,8 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
             fingerprint,
         )
 
-        cached = coalition_cache.get(coalition_id)
+        with state_lock:
+            cached = coalition_cache.get(coalition_id)
         if cached is not None:
             require_evaluation_score(
                 cached,
@@ -519,6 +537,7 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
             int(seed),
             removed_agents=removed_agents,
             removal_protocol=protocol,
+            set_global_seed=concurrency == 1,
         )
         score = require_evaluation_score(
             evaluation,
@@ -542,26 +561,60 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
             "execution_fingerprint": fingerprint,
             "execution_treatment": treatment,
         }
-        coalition_cache[coalition_id] = row
-
-        append_jsonl(run_path, [run])
-        append_jsonl(trace_path, traces)
-        append_jsonl(evaluation_path, [evaluation])
-        append_jsonl(coalition_path, [row])
-
         nonlocal written_runs, written_traces, written_evaluations, written_coalitions
-        written_runs += 1
-        written_traces += len(traces)
-        written_evaluations += 1
-        written_coalitions += 1
+        with state_lock:
+            existing = coalition_cache.get(coalition_id)
+            if existing is not None:
+                return existing
+            coalition_cache[coalition_id] = row
+            append_jsonl(run_path, [run])
+            append_jsonl(trace_path, traces)
+            append_jsonl(evaluation_path, [evaluation])
+            append_jsonl(coalition_path, [row])
+            written_runs += 1
+            written_traces += len(traces)
+            written_evaluations += 1
+            written_coalitions += 1
         return row
 
     for task_index, task in enumerate(tasks, start=1):
         for architecture_id, roles in architecture_roles:
             roles = list(roles)
-            all_agents = set(roles)
-
-            for seed in seeds:
+            def process_group(
+                seed: int,
+                *,
+                group_task: dict[str, Any] = task,
+                group_task_index: int = task_index,
+                group_architecture_id: str = architecture_id,
+                group_roles: list[str] = roles,
+            ) -> None:
+                nonlocal completed, written_attribution
+                task = group_task
+                task_index = group_task_index
+                architecture_id = group_architecture_id
+                roles = group_roles
+                all_agents = set(roles)
+                expected_ids = {
+                    _sampled_attribution_id(
+                        experiment.experiment_id,
+                        task["task_id"],
+                        architecture_id,
+                        seed,
+                        method,
+                        agent,
+                        fingerprint,
+                    )
+                    for method in methods
+                    for agent in roles
+                }
+                with state_lock:
+                    group_complete = expected_ids.issubset(done_attr)
+                if group_complete:
+                    print_progress(
+                        f"[skip-group] task_index={task_index}/{len(tasks)} task={task['task_id']} "
+                        f"arch={architecture_id} seed={seed} completed_attributions={len(expected_ids)}"
+                    )
+                    return
                 full_info = evaluate_coalition(task, architecture_id, int(seed), roles, all_agents)
                 full_score = require_evaluation_score(
                     full_info,
@@ -657,8 +710,11 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
                             f"method={method} task={task['task_id']} arch={architecture_id} "
                             f"seed={seed} agent={agent}"
                         )
-                        if attribution_id in done_attr:
-                            print_progress(f"[skip] {completed}/{total} {label} attribution_id={attribution_id}")
+                        with state_lock:
+                            already_done = attribution_id in done_attr
+                            completed_snapshot = completed
+                        if already_done:
+                            print_progress(f"[skip] {completed_snapshot}/{total} {label} attribution_id={attribution_id}")
                             continue
 
                         values = marginals_by_agent.get(agent, [])
@@ -702,15 +758,32 @@ def run_coalition_attribution(config_path: str | Path, max_tasks: int | None = N
                             },
                         )
 
-                        append_jsonl(attribution_path, [record])
-                        done_attr.add(record.attribution_id)
-                        completed += 1
-                        written_attribution += 1
+                        with state_lock:
+                            if record.attribution_id in done_attr:
+                                continue
+                            append_jsonl(attribution_path, [record])
+                            done_attr.add(record.attribution_id)
+                            completed += 1
+                            written_attribution += 1
+                            completed_snapshot = completed
 
                         print_progress(
-                            f"[done] {completed}/{total} method={method} attribution_id={record.attribution_id} "
+                            f"[done] {completed_snapshot}/{total} method={method} attribution_id={record.attribution_id} "
                             f"agent={agent} score={score} samples={sample_count} stderr={stderr}"
                         )
+
+            for seed in seeds:
+                if executor is None:
+                    process_group(int(seed))
+                else:
+                    futures.append(executor.submit(process_group, int(seed)))
+
+    if executor is not None:
+        try:
+            for future in as_completed(futures):
+                future.result()
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     summary = {
         "records": completed,

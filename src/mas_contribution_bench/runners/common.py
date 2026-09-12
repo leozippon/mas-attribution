@@ -404,6 +404,7 @@ def run_mas_once(
     agent_role_map: dict[str, str] | None = None,
     permission_overrides: dict[str, dict[str, bool]] | None = None,
     condition_id: str | None = None,
+    set_global_seed: bool = True,
 ) -> tuple[RunRecord, list[Any], Any]:
     if permission_overrides:
         toggle_names = [
@@ -412,7 +413,10 @@ def run_mas_once(
             for name in overrides
         ]
         validate_permission_toggles(toggle_names, context="permission intervention")
-    set_seed(seed)
+    # The model request itself receives ``seed`` below. Avoid mutating process-
+    # global RNG state when independent runs are executed by worker threads.
+    if set_global_seed:
+        set_seed(seed)
     architecture = experiment.benchmark.architectures[architecture_id]
     active_roles = [role for role in architecture.roles if role not in (removed_agents or set())]
     model_client = build_model_client(experiment)
