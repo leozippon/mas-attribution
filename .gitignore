@@ -18,5 +18,7 @@ data/archive/
 data/backups/
 outputs/
 logs/
+manuscript/
+AGENTS.md
 
 *.zip
