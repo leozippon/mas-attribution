@@ -1245,6 +1245,22 @@ def _permission_toggle_names(intervention: dict[str, Any]) -> list[str]:
 
 def _validate_configured_permission_interventions(interventions: list[dict[str, Any]]) -> None:
     for intervention in interventions:
+        explicit_overrides = intervention.get("permission_overrides")
+        if explicit_overrides is not None:
+            if not isinstance(explicit_overrides, dict):
+                raise ValueError(
+                    f"Permission condition {intervention.get('id')} permission_overrides must be a mapping."
+                )
+            for role, overrides in explicit_overrides.items():
+                if not isinstance(overrides, dict):
+                    raise ValueError(
+                        f"Permission condition {intervention.get('id')} overrides for {role} must be a mapping."
+                    )
+                validate_permission_toggles(
+                    [str(name) for name in overrides],
+                    context=f"permission condition {intervention.get('id')} role {role}",
+                )
+            continue
         validate_permission_toggles(
             _permission_toggle_names(intervention),
             context=f"permission intervention {intervention.get('id')}",
@@ -1289,6 +1305,40 @@ def _permission_conditions(
 
     for intervention in interventions:
         intervention_id = str(intervention["id"])
+        explicit_overrides = intervention.get("permission_overrides")
+        if explicit_overrides is not None:
+            overrides = {
+                str(role): {str(name): bool(value) for name, value in values.items()}
+                for role, values in explicit_overrides.items()
+            }
+            affected_roles = sorted(overrides)
+            absent_roles = sorted(set(affected_roles) - role_set)
+            if absent_roles:
+                print_progress(
+                    f"[skip-permission] architecture={architecture_id} intervention={intervention_id} "
+                    f"roles={absent_roles} reason=role_absent"
+                )
+                continue
+            conditions.append(
+                {
+                    "condition_id": f"{architecture_id}__{intervention_id}",
+                    "permission_intervention_id": intervention_id,
+                    "intervention_type": str(intervention.get("intervention_type", "configured")),
+                    "target_role": intervention.get("target_role"),
+                    "source_role": intervention.get("source_role"),
+                    "destination_role": intervention.get("destination_role"),
+                    "target_roles": affected_roles,
+                    "level": intervention.get("level", "configured"),
+                    "level_label": str(intervention.get("level_label", "configured")),
+                    "toggle": intervention.get("toggle"),
+                    "toggles": list(intervention.get("toggles", [])),
+                    "permission_overrides": overrides,
+                    "description": intervention.get("description"),
+                    "controls": ["same_topology", "same_roles", "same_prompts", "same_model", "same_task"],
+                }
+            )
+            continue
+
         target_role = str(intervention["role"])
         levels = list(intervention.get("levels", []))
         if target_role not in role_set:
@@ -1307,7 +1357,11 @@ def _permission_conditions(
                 {
                     "condition_id": f"{architecture_id}__{intervention_id}__{level_label}",
                     "permission_intervention_id": intervention_id,
+                    "intervention_type": "toggle",
                     "target_role": target_role,
+                    "source_role": target_role,
+                    "destination_role": None,
+                    "target_roles": [target_role],
                     "level": level,
                     "level_label": level_label,
                     "toggle": intervention.get("toggle"),
@@ -1318,6 +1372,17 @@ def _permission_conditions(
             )
 
     return conditions
+
+
+def _permission_condition_metadata(condition: dict[str, Any]) -> dict[str, Any]:
+    """Keep transfer and revocation provenance with every coalition and attribution row."""
+    return {
+        "intervention_type": condition.get("intervention_type", "toggle"),
+        "source_role": condition.get("source_role"),
+        "destination_role": condition.get("destination_role"),
+        "target_roles": list(condition.get("target_roles", [])),
+        "description": condition.get("description"),
+    }
 
 
 def _permission_feature_rows(
@@ -1335,6 +1400,32 @@ def _permission_feature_rows(
         roles = list(architecture.roles)
         role_set = set(roles)
         for intervention in interventions:
+            explicit_overrides = intervention.get("permission_overrides")
+            if explicit_overrides is not None:
+                affected_roles = sorted(str(role) for role in explicit_overrides)
+                applicable = set(affected_roles).issubset(role_set)
+                rows.append(
+                    {
+                        "architecture_id": architecture_id,
+                        "permission_intervention_id": intervention.get("id"),
+                        "intervention_type": intervention.get("intervention_type", "configured"),
+                        "source_role": intervention.get("source_role"),
+                        "destination_role": intervention.get("destination_role"),
+                        "target_roles": affected_roles,
+                        "toggle": intervention.get("toggle"),
+                        "toggles": list(intervention.get("toggles", [])),
+                        "permission_overrides": explicit_overrides,
+                        "applicable": applicable,
+                        "available_roles": roles,
+                        "design": "runtime_permission_revocation_or_transfer",
+                        "roles_fixed": True,
+                        "topology_fixed": True,
+                        "prompts_fixed": True,
+                        "model_fixed": True,
+                    }
+                )
+                continue
+
             target_role = str(intervention.get("role"))
             levels = list(intervention.get("levels", []))
             applicable = target_role in role_set
@@ -1403,9 +1494,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
 
     experiment = load_experiment(config_path)
     permission_interventions = list(experiment.raw.get("permission_interventions", []))
-    if not permission_interventions:
-        raise ValueError("exp07 requires permission_interventions.")
-    _validate_configured_permission_interventions(permission_interventions)
+    permission_conditions = list(experiment.raw.get("permission_conditions", []))
+    permission_specs = permission_interventions + permission_conditions
+    if not permission_specs:
+        raise ValueError("exp07 requires permission_interventions or permission_conditions.")
+    _validate_configured_permission_interventions(permission_specs)
     attribution_cfg = experiment.raw.get("attribution", {})
     methods = _intervention_methods(experiment)
     protocol = str(attribution_cfg.get("removal_protocol", "null_agent_replacement"))
@@ -1469,11 +1562,11 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
     architecture_conditions: list[tuple[str, list[str], dict[str, Any]]] = []
     for architecture_id in architectures:
         roles = list(experiment.benchmark.architectures[architecture_id].roles)
-        for condition in _permission_conditions(architecture_id, roles, permission_interventions):
+        for condition in _permission_conditions(architecture_id, roles, permission_specs):
             architecture_conditions.append((architecture_id, roles, condition))
 
     if not architecture_conditions:
-        raise ValueError("No applicable permission_interventions for the selected base_architectures.")
+        raise ValueError("No applicable permission intervention conditions for the selected base_architectures.")
 
     total = len(tasks) * len(seeds) * sum(
         len(roles) * len(methods)
@@ -1494,7 +1587,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
         f"total_attributions={total} already_done={completed}"
     )
 
-    feature_rows = _permission_feature_rows(experiment, architectures, permission_interventions)
+    feature_rows = _permission_feature_rows(experiment, architectures, permission_specs)
     if feature_rows and (fresh or not statistics_path.exists()):
         append_jsonl(statistics_path, feature_rows)
 
@@ -1560,6 +1653,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
             "sampling_seed": int(seed),
             "condition_id": condition["condition_id"],
             "permission_intervention_id": condition["permission_intervention_id"],
+            **_permission_condition_metadata(condition),
             "target_role": condition["target_role"],
             "level": condition["level"],
             "level_label": condition["level_label"],
@@ -1704,6 +1798,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                             metadata={
                                 "condition_id": condition["condition_id"],
                                 "permission_intervention_id": condition["permission_intervention_id"],
+                                **_permission_condition_metadata(condition),
                                 "target_role": condition["target_role"],
                                 "level": condition["level"],
                                 "level_label": condition["level_label"],
@@ -1831,6 +1926,7 @@ def run_permission_intervention(config_path: str | Path, max_tasks: int | None =
                             metadata={
                                 "condition_id": condition["condition_id"],
                                 "permission_intervention_id": condition["permission_intervention_id"],
+                                **_permission_condition_metadata(condition),
                                 "target_role": condition["target_role"],
                                 "level": condition["level"],
                                 "level_label": condition["level_label"],
@@ -1889,10 +1985,10 @@ def run_intervention(config_path: str | Path, max_tasks: int | None = None) -> d
         return run_topology_intervention(config_path, max_tasks=max_tasks)
     if "role_swaps" in experiment.raw:
         return run_role_intervention(config_path, max_tasks=max_tasks)
-    if "permission_interventions" in experiment.raw:
+    if "permission_interventions" in experiment.raw or "permission_conditions" in experiment.raw:
         return run_permission_intervention(config_path, max_tasks=max_tasks)
 
     raise NotImplementedError(
         f"No intervention runner implemented for {experiment.experiment_id}. "
-        "Currently supported: topology_variants, role_swaps, permission_interventions."
+        "Currently supported: topology_variants, role_swaps, permission_interventions, permission_conditions."
     )

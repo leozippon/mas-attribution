@@ -39,6 +39,9 @@ EXPERIMENT_ALIASES = {
     "exp05_topology_intervention": "configs/experiments/exp05_topology_intervention.yaml",
     "exp06_role_intervention": "configs/experiments/exp06_role_intervention.yaml",
     "exp07_permission_intervention": "configs/experiments/exp07_permission_intervention.yaml",
+    "exp07_permission_revocation_transfer_a5": (
+        "configs/experiments/exp07_permission_revocation_transfer_a5.yaml"
+    ),
     "exp08_generalization": "configs/experiments/exp08_generalization.yaml",
     "exp09_contribution_predictor": "configs/experiments/exp09_contribution_predictor.yaml",
 }
@@ -99,7 +102,7 @@ def infer_runner(experiment_id: str, mode: str | None):
         return run_single_agent_baseline
     if "generalization" in experiment_id:
         return run_generalization
-    if "intervention" in experiment_id:
+    if "intervention" in experiment_id or "permission" in experiment_id:
         return run_intervention
     if any(key in experiment_id for key in ["loo", "shapley", "banzhaf", "myerson", "owen"]):
         return run_attribution

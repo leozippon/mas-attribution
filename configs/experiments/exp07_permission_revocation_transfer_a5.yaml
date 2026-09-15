@@ -1,0 +1,159 @@
+id: exp07_permission_revocation_transfer_a5
+stage: 7
+name: A5 runtime permission revocation and transfer
+purpose: >
+  Separate role prompt and graph-position effects from operational authority.
+  The experiment holds the A5-star topology, role prompts, model, task, and
+  seed fixed while revoking or transferring write and final-answer authority.
+depends_on:
+  - exp06_role_intervention
+research_questions:
+  - RQ5
+hypotheses:
+  - H4
+  - H5
+datasets:
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+base_architectures:
+  - A5_star
+permission_conditions:
+  - id: baseline
+    intervention_type: baseline
+    permission_overrides: {}
+    description: Default A5 permissions; no runtime authority is changed.
+  - id: revoke_coder_write_solution
+    intervention_type: revocation
+    source_role: coder
+    target_role: coder
+    toggle: write_solution
+    permission_overrides:
+      coder:
+        write_solution: false
+    description: Remove the coder's authority to publish a solution artifact.
+  - id: revoke_finalizer_final_answer
+    intervention_type: revocation
+    source_role: finalizer
+    target_role: finalizer
+    toggle: final_answer
+    permission_overrides:
+      finalizer:
+        final_answer: false
+    description: Remove the finalizer's authority to submit the final answer.
+  - id: transfer_write_solution_coder_to_verifier
+    intervention_type: transfer
+    source_role: coder
+    destination_role: verifier
+    target_role: verifier
+    toggle: write_solution
+    permission_overrides:
+      coder:
+        write_solution: false
+      verifier:
+        write_solution: true
+    description: Move solution-artifact authority from the coder to the verifier.
+  - id: transfer_final_answer_finalizer_to_verifier
+    intervention_type: transfer
+    source_role: finalizer
+    destination_role: verifier
+    target_role: verifier
+    toggle: final_answer
+    permission_overrides:
+      finalizer:
+        final_answer: false
+      verifier:
+        final_answer: true
+    description: Move final-submission authority from the finalizer to the verifier.
+permission_enforcement:
+  mode: strict
+  block_unauthorized_artifacts: true
+  require_authorized_final_answer: true
+  record_permission_diagnostics: true
+attribution:
+  methods:
+    - loo
+  utility: task
+  removal_protocol: null_agent_replacement
+analysis:
+  descriptive_only: true
+  contrast_pairs:
+    - [baseline, revoke_coder_write_solution]
+    - [baseline, revoke_finalizer_final_answer]
+    - [revoke_coder_write_solution, transfer_write_solution_coder_to_verifier]
+    - [revoke_finalizer_final_answer, transfer_final_answer_finalizer_to_verifier]
+seeds:
+  - 0
+  - 1
+  - 2
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
+outputs:
+  run_dir: data/runs/exp07_permission_transfer_a5
+  trace_dir: data/traces/exp07_permission_transfer_a5
+  attribution_file: data/results/exp07_permission_transfer_a5/attribution.jsonl
+  coalition_file: data/results/exp07_permission_transfer_a5/coalitions.jsonl
+  score_file: data/results/exp07_permission_transfer_a5/scores.jsonl
+  statistics_file: data/results/exp07_permission_transfer_a5/statistics.jsonl
+benchmark_specs:
+  architecture_dir: configs/benchmark_specs/architectures
+  agent_dir: configs/benchmark_specs/agents
+  prompt_dir: configs/benchmark_specs/prompts
+  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+model:
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8002/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 6
+  managed_externally: true
+  managed_by: zhangqy
+  homogeneous: true
+  temperature: 0.2
+  max_tokens: 2048
+  timeout_seconds: 900
+logging:
+  save_run_records: true
+  save_full_trace: true
+  save_tool_calls: true
+  save_intermediate_outputs: true
+  save_cost: true
+  save_failure_type: true
+  trace_graphs:
+    - design_graph
+    - trace_graph
+    - dependency_graph
+evaluation:
+  primary_utility: task
+  notes: >
+    A5-star is used because coder, verifier, and finalizer all exist as real
+    graph positions. LiveCodeBench and SWE-bench Verified are excluded because
+    their official scoring is post-hoc rather than available in the attribution loop.
