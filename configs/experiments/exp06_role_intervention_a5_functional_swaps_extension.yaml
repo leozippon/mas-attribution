@@ -1,0 +1,136 @@
+id: exp06_role_intervention_a5_functional_swaps_extension
+stage: 6
+name: A5 star functional role swap extension
+purpose: >
+  Extend the completed Planner-Coder A5 role-swap result with the two missing
+  functional contrasts: generation versus verification and critique versus
+  final-answer synthesis. Graph edges, position-level permissions, model,
+  tasks, and seeds remain fixed.
+depends_on:
+  - exp03_loo_attribution
+  - exp05_topology_intervention
+research_questions:
+  - RQ3
+  - RQ4
+hypotheses:
+  - H3
+  - H5
+datasets:
+  - name: aime_2026
+    task_file: data/processed/tasks/aime_2026_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: gpqa_diamond
+    task_file: data/processed/tasks/gpqa_diamond_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: hle
+    task_file: data/processed/tasks/hle_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: arc_agi_2
+    task_file: data/processed/tasks/arc_agi_2_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+  - name: ifbench
+    task_file: data/processed/tasks/ifbench_tasks.jsonl
+    split: test
+    max_tasks: 30
+    task_selection: seeded_random
+base_architectures:
+  - A5_star
+role_swaps:
+  - id: coder_verifier_swap
+    swap:
+      - coder
+      - verifier
+    description: >
+      Exchange generation and verification functional prompts while retaining
+      graph positions and their position-level permissions.
+    controls:
+      - same_topology
+      - same_position_permissions
+      - same_model
+      - same_tasks_and_seeds
+  - id: critic_finalizer_swap
+    swap:
+      - critic
+      - finalizer
+    description: >
+      Exchange critique and final-answer-synthesis functional prompts while
+      retaining the critic and finalizer graph positions and permissions.
+    controls:
+      - same_topology
+      - same_position_permissions
+      - same_model
+      - same_tasks_and_seeds
+attribution:
+  methods:
+    - loo
+  utility: task
+  removal_protocol: null_agent_replacement
+analysis:
+  descriptive_only: true
+  notes: >
+    Attribution remains indexed by graph-position role. Metadata records the
+    functional prompt assigned to each position. The existing A5
+    Planner-Coder result is retained as the main planning-versus-implementation
+    comparison; this extension adds only the two missing pair-specific
+    baselines and swapped conditions.
+seeds:
+  - 0
+  - 1
+  - 2
+sampling:
+  unit: task
+  selection_seed: 0
+  task_selection: seeded_random
+outputs:
+  run_dir: data/runs/exp06_a5_functional_swaps_extension
+  trace_dir: data/traces/exp06_a5_functional_swaps_extension
+  attribution_file: data/results/exp06_a5_functional_swaps_extension/attribution.jsonl
+  coalition_file: data/results/exp06_a5_functional_swaps_extension/coalitions.jsonl
+  score_file: data/results/exp06_a5_functional_swaps_extension/scores.jsonl
+  statistics_file: data/results/exp06_a5_functional_swaps_extension/statistics.jsonl
+benchmark_specs:
+  architecture_dir: configs/benchmark_specs/architectures
+  agent_dir: configs/benchmark_specs/agents
+  prompt_dir: configs/benchmark_specs/prompts
+  permission_file: configs/benchmark_specs/permissions/permission_sets.yaml
+model:
+  backend: vllm
+  name: qwen-local
+  served_model_name: qwen-local
+  base_url: http://127.0.0.1:8000/v1
+  api_key: dummy
+  weights_path: /Data/public/Qwen3.8-27B-FP8
+  context_length: 262144
+  tensor_parallel_size: 2
+  max_num_seqs: 6
+  managed_externally: true
+  managed_by: zhangqy
+  homogeneous: true
+  temperature: 0.2
+  max_tokens: 2048
+  timeout_seconds: 900
+logging:
+  save_run_records: true
+  save_full_trace: true
+  save_tool_calls: true
+  save_intermediate_outputs: true
+  save_cost: true
+  save_failure_type: true
+  trace_graphs:
+    - design_graph
+    - trace_graph
+    - dependency_graph
+evaluation:
+  primary_utility: task
+  notes: >
+    Only locally scored datasets are eligible for in-loop attribution.
+    LiveCodeBench and SWE-bench Verified remain excluded because their scores
+    require post-hoc official evaluation.
